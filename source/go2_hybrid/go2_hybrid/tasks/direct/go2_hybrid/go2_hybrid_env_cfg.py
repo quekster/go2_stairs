@@ -149,10 +149,12 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.2)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=100,
-            vertical_fov_range= [-90,90], horizontal_fov_range=[-90,90], horizontal_res=1.0
+            channels=1,
+            vertical_fov_range= [0,0], horizontal_fov_range=[-2,2], horizontal_res=1.0
         ),
         mesh_prim_paths=["/World/Terrain"],
+        update_period=0.1,
+        history_length=0,
         debug_vis=True,
     )
     

@@ -13,7 +13,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 # from .visualisation import VelArrowsVisualizer
-from isaaclab.utils.math import quat_from_angle_axis, yaw_quat, quat_apply  # used later
+from isaaclab.utils.math import quat_apply, quat_conjugate
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -33,6 +33,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._step_counter =0
         self._marker= None
+        self._lidar_buffer = None
 
         # action buffers (derived from Gym space for robustness)
         dim = gym.spaces.flatdim(self.single_action_space)
@@ -80,20 +81,13 @@ class Go2HybridEnv(DirectRLEnv):
         self._robot = Articulation(self.cfg.robot_cfg)   # note: cfg attribute name is robot_cfg in your direct cfg
         self.scene.articulations["robot"] = self._robot
 
-
-        # # Contact sensor (cover entire robot; history for air-time)
-        # contact_cfg = ContactSensorCfg(
-        #     prim_path="/World/envs/env_.*/Robot/.*",
-        #     history_length=3,
-        #     update_period=0.005,
-        #     track_air_time=True,
-        # )
-
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
         self._height_scanner=RayCaster(self.cfg.height_scanner)
         self.scene.sensors["height_scanner"]=self._height_scanner
+        self._lidar_buffer= None
+        self._lidar_buffer_size = 3
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -117,7 +111,7 @@ class Go2HybridEnv(DirectRLEnv):
         translations = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)  # shape (1,3)
         self._marker.visualize(translations=translations)
 
-
+        #----------------------------------------------#
 
         # Clone & replicate envs
         self.scene.clone_environments(copy_from_source=False)
@@ -145,7 +139,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
-        #lidar_scan = torch.clamp(self._height_scanner.data.ray_hits_)
+        lidar_obs = self.get_stacked_bf_hits()
         obs = torch.cat(
             [
                 self._robot.data.root_lin_vel_b,                              # (N,3)
@@ -155,17 +149,35 @@ class Go2HybridEnv(DirectRLEnv):
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # (N,ndof)
                 self._robot.data.joint_vel,                                   # (N,ndof)
                 self._actions,                                                # (N,ndof)
+
+                lidar_obs
             ],
             dim=-1,
         )
         self._step_counter += 1
-        if self._step_counter % 100 == 0:  # every 100 steps
-            print("Step", self._step_counter, 
-                "Front ray hits (world frame):",
-                self._height_scanner.data.ray_hits_w[0, 85:95])
-            self.plot_lidar_3d(env_id=0)    
+
+        hits_b = self.get_bf_hits()
+        print("Current base frame hits:", hits_b[0])
+        print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
+        print(f"[DEBUG] Frame_t-1 hits: {lidar_obs[0].cpu().numpy()}")
+        # print(f"[DEBUG] Frame_t hits: {lidar_obs[0, -3:].cpu().numpy()}")
+
+        print("------------------NEXT STEP------------------")
 
 
+        # if self._step_counter % 100 == 0:  # every 100 steps
+
+        #     #-----debugger for current hits (base/world)--------#
+        #     hits_b = self.get_bf_hits()
+        #     print("Base frame hits:", hits_b[0, -1])
+        #     # print("Robot Base Position:", self._robot.data.root_pos_w)
+        #     #print("Step", self._step_counter, "Front ray hits (world frame):", self._height_scanner.data.ray_hits_w[0, 85:95])
+        #     print("-----")
+        #     #------debugger for stacked hits(base)-------#
+        #     print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
+        #     print(f"[DEBUG] Middle values of current frame: {lidar_obs[0, -3:].cpu().numpy()}")
+
+        #     self.plot_lidar_3d(env_id=0)    
 
         return {"policy": obs}
 
@@ -231,6 +243,20 @@ class Go2HybridEnv(DirectRLEnv):
         # reference standing height per env (z of default pose + env origin z)
         self._stand_height_ref[env_ids] = (self._robot.data.default_root_state[env_ids][:, 2] + origins[env_ids][:, 2])
 
+        # initialisation or clearing of lidar buffer for reset envs
+        if self._lidar_buffer is None or self._lidar_buffer.shape[0] != self.num_envs:
+            # get number of rays by sampling current hits
+            hits0 = self._height_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
+            num_rays = hits0.shape[1]
+            # buffer shape: (num_envs, buffer_size, num_rays, 3)
+            self._lidar_buffer = torch.zeros(
+                (self.num_envs, self._lidar_buffer_size, num_rays, 3),
+                dtype=hits0.dtype, device=self.device
+            )
+        else:
+            # zero‐out the buffer entries for reset envs
+            self._lidar_buffer[env_ids] = 0.0
+
 
         # episode logs (averaged over the just-reset envs)
         extras = dict()
@@ -246,12 +272,16 @@ class Go2HybridEnv(DirectRLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
 
-    def plot_lidar_3d(self, env_id = 0):
+    def plot_lidar_3d(self, env_id = 0, frame="world"):
         tl = omni.timeline.get_timeline_interface()
         tl.pause()
 
         lidar = self.scene.sensors["height_scanner"]
-        hits = lidar.data.ray_hits_w[env_id].detach().cpu().numpy()
+        # if frame == "world":
+        #     hits = lidar.data.ray_hits_w[env_id].detach().cpu().numpy()
+        # else:
+        #     hits = self.get_bf_hits(torch.tensor([env_id], device=self.device))[0].detach().cpu().numpy()
+        hits = self.get_bf_hits(torch.tensor([env_id], device=self.device))[0].detach().cpu().numpy()
 
         mask = np.isfinite(hits).all(axis=1)
         hits = hits[mask]
@@ -278,3 +308,37 @@ class Go2HybridEnv(DirectRLEnv):
         plt.show(block=True)
         plt.close()
         tl.play()
+
+    def get_bf_hits(self, env_ids=None):
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device = self.device)
+
+        hits_w = self._height_scanner.data.ray_hits_w[env_ids]
+        base_pos_w = self._robot.data.root_pos_w[env_ids]
+        base_quat_w = self._robot.data.root_quat_w[env_ids]
+
+        base_quat_inv = quat_conjugate(base_quat_w)
+        hits_shifted = hits_w - base_pos_w.unsqueeze(1)
+        hits_b = quat_apply(base_quat_inv.unsqueeze(1), hits_shifted)
+        print("hits_w shape:", hits_w.shape)
+
+        return hits_b
+
+    def get_stacked_bf_hits(self, env_ids=None):
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device = self.device)
+
+        current_hits_b = self.get_bf_hits(env_ids)
+        buff = self._lidar_buffer # expects shape (num_envs, buffer_size, R, 3)
+        buff[env_ids, :-1, :, :] = buff[env_ids, 1:, :, :]         # shift older frames
+        buff[env_ids, -1, :, :] = current_hits_b #adds newest frame scans
+
+        # -- flatten stack across temporal frames
+        N = current_hits_b.shape[0]
+        B = self._lidar_buffer_size
+        R = current_hits_b.shape[1]
+        stacked = buff[env_ids].reshape(N, B * R * 3)
+        stacked = torch.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0) #any NaN entries will be replaced with 0.0
+
+        return stacked
+
