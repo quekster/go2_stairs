@@ -41,7 +41,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     )
 
     
-    #-----terrain-------#
+    #-----terrain-------NOT USED--#
 
     terrain_gen= TerrainGeneratorCfg(
         size=(8.0, 8.0),
@@ -76,8 +76,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         prim_path="/World/Terrain",
         #terrain_type="generator",
         #terrain_generator=terrain_gen,
-        terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_colour.usdz",
+        terrain_type="plane",
+        #usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_colour.usdz",
         
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -149,16 +149,15 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.2)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=1,
-            vertical_fov_range= [0,0], horizontal_fov_range=[-2,2], horizontal_res=1.0
+            channels=40,
+            vertical_fov_range= [-7,52], horizontal_fov_range=[-90,90], horizontal_res=1.0
         ),
         mesh_prim_paths=["/World/Terrain"],
         update_period=0.1,
         history_length=0,
-        debug_vis=True,
+        debug_vis=False,
     )
     
-
 
     # ---------- reward scales ----------
     #   self.rewards.track_lin_vel_xy_exp.weight  -> lin_vel_reward_scale

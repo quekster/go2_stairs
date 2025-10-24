@@ -139,7 +139,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
-        lidar_obs = self.get_stacked_bf_hits()
+        #lidar_obs = self.get_stacked_bf_hits()
         obs = torch.cat(
             [
                 self._robot.data.root_lin_vel_b,                              # (N,3)
@@ -150,34 +150,24 @@ class Go2HybridEnv(DirectRLEnv):
                 self._robot.data.joint_vel,                                   # (N,ndof)
                 self._actions,                                                # (N,ndof)
 
-                lidar_obs
+                # lidar_obs
             ],
             dim=-1,
         )
         self._step_counter += 1
 
-        hits_b = self.get_bf_hits()
-        print("Current base frame hits:", hits_b[0])
-        print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
-        print(f"[DEBUG] Frame_t-1 hits: {lidar_obs[0].cpu().numpy()}")
-        # print(f"[DEBUG] Frame_t hits: {lidar_obs[0, -3:].cpu().numpy()}")
+        #-----DEBUGGER for hits (base/world)--------#
 
-        print("------------------NEXT STEP------------------")
+        # hits_b = self.get_bf_hits()
+        # print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
+        # print("Current base frame hits:", hits_b[0])
+        # print(f"[DEBUG] Frame_t-2 hits: {lidar_obs[0].cpu().numpy()}")
+        # print("------------------NEXT STEP------------------")
 
-
-        # if self._step_counter % 100 == 0:  # every 100 steps
-
-        #     #-----debugger for current hits (base/world)--------#
+        # if self._step_counter % 50 == 0:  # every 100 steps
+        # #     self.plot_lidar_3d(env_id=0)
         #     hits_b = self.get_bf_hits()
-        #     print("Base frame hits:", hits_b[0, -1])
-        #     # print("Robot Base Position:", self._robot.data.root_pos_w)
-        #     #print("Step", self._step_counter, "Front ray hits (world frame):", self._height_scanner.data.ray_hits_w[0, 85:95])
-        #     print("-----")
-        #     #------debugger for stacked hits(base)-------#
-        #     print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
-        #     print(f"[DEBUG] Middle values of current frame: {lidar_obs[0, -3:].cpu().numpy()}")
-
-        #     self.plot_lidar_3d(env_id=0)    
+        #     print("Current base frame hits:", hits_b[0])
 
         return {"policy": obs}
 
@@ -319,8 +309,10 @@ class Go2HybridEnv(DirectRLEnv):
 
         base_quat_inv = quat_conjugate(base_quat_w)
         hits_shifted = hits_w - base_pos_w.unsqueeze(1)
-        hits_b = quat_apply(base_quat_inv.unsqueeze(1), hits_shifted)
-        print("hits_w shape:", hits_w.shape)
+        N, R, _ = hits_shifted.shape
+        base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, R, -1) # shape (N, R, 4)
+
+        hits_b = quat_apply(base_quat_exp, hits_shifted) 
 
         return hits_b
 

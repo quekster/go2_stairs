@@ -3,13 +3,13 @@ import torch
 from typing import Dict, Tuple
 
 def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
-    """Exp kernel on XY linear vel tracking (body-frame, kept as in your code)."""
-    err = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
-    return torch.exp(-err / std2)
+    """Reward tracking of linear velocity commands (xy axes) using exponential kernel."""
+    lin_vel_err = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
+    return torch.exp(-lin_vel_err / std2)
 
 
 def track_ang_vel_z_exp(env, std2: float = 0.25) -> torch.Tensor:
-    """Exp kernel on yaw-rate tracking (body-frame z, kept as in your code)."""
+    """Reward tracking of angular velocity commands (yaw) using exponential kernel."""
     err = torch.square(env._commands[:, 2] - env._robot.data.root_ang_vel_b[:, 2])
     return torch.exp(-err / std2)
 
@@ -25,7 +25,7 @@ def ang_vel_xy_l2(env) -> torch.Tensor:
 
 
 def joint_torques_l2(env) -> torch.Tensor:
-    """Penalize effort."""
+    """Penalize joint accelerations on the articulation using L2 squared kernel."""
     return torch.sum(torch.square(env._robot.data.applied_torque), dim=1)
 
 
@@ -35,7 +35,7 @@ def joint_acc_l2(env) -> torch.Tensor:
 
 
 def action_rate_l2(env) -> torch.Tensor:
-    """Penalize action change."""
+    """Penalize the rate of change of the actions using L2 squared kernel."""
     return torch.sum(torch.square(env._actions - env._previous_actions), dim=1)
 
 
@@ -56,7 +56,7 @@ def undesired_contacts(env, threshold: float = 1.0) -> torch.Tensor:
 
 
 def flat_orientation_l2(env) -> torch.Tensor:
-    """Penalize torso tilt via projected gravity's xy components."""
+    """Reward the agent for aligning its gravity with the desired gravity vector using L2 squared kernel."""
     return torch.sum(torch.square(env._robot.data.projected_gravity_b[:, :2]), dim=1)
 
 # def base_height_gaussian(env, std: float = 0.05, fallback_h: float = 0.38) -> torch.Tensor:
