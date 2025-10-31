@@ -19,8 +19,12 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     episode_length_s = 20.0
     decimation = 4
     action_space = 12          # Unitree Go2 typically 12 actuated joints
-    observation_space = 48     # will be validated at runtime
+    observation_space = 1398    # will be validated at runtime 21648 
     state_space = 0
+    dt=0.005
+
+    action_scale = 0.25
+    max_episode_length = int(episode_length_s / (dt * decimation))
 
     #simulation
     sim: SimulationCfg = SimulationCfg(
@@ -37,39 +41,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     # ---------- scene ----------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=0.0, replicate_physics=True
-    )
-
-    
-    #-----terrain-------NOT USED--#
-
-    terrain_gen= TerrainGeneratorCfg(
-        size=(8.0, 8.0),
-        border_width=5.0,
-        num_rows=1,
-        num_cols=1,
-        horizontal_scale=0.1,
-        vertical_scale=0.005,
-        slope_threshold=0.75,
-        use_cache=False,
-        sub_terrains={
-            "pyramid_stairs": MeshPyramidStairsTerrainCfg(
-                proportion=1.0,
-                step_height_range=(0.05, 0.23),
-                step_width=0.3,
-                platform_width=3.0,
-                border_width=1.0,
-                holes=False,
-            ),
-            # "pyramid_stairs_inv": MeshInvertedPyramidStairsTerrainCfg(
-            #     proportion=0.2,
-            #     step_height_range=(0.05, 0.23),
-            #     step_width=0.3,
-            #     platform_width=3.0,
-            #     border_width=1.0,
-            #     holes=False,
-            # ),
-        },
+        num_envs=200, env_spacing=1.0, replicate_physics=True
     )
 
     terrain = TerrainImporterCfg(
@@ -110,7 +82,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.4),
+            pos=(0.0, 0.0, 0.2),
             joint_pos={
                 ".*L_hip_joint": 0.1,
                 ".*R_hip_joint": -0.1,
@@ -142,41 +114,23 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     history_length=3,
     update_period=0.005,
     track_air_time=True,
+    debug_vis=False,
+    filter_prim_paths_expr="/World/Terrain",
+    max_contact_data_count_per_prim=20,
     )
 
     height_scanner=RayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/base",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.2)),
+        prim_path="/World/envs/env_.*/Robot/Head_upper",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.1)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=40,
-            vertical_fov_range= [-7,52], horizontal_fov_range=[-90,90], horizontal_res=1.0
+            channels=5,
+            vertical_fov_range= [-50,-10], horizontal_fov_range=[-45,45], horizontal_res=2.0
         ),
         mesh_prim_paths=["/World/Terrain"],
-        update_period=0.1,
+        update_period=0.0,
         history_length=0,
         debug_vis=False,
     )
     
-
-    # ---------- reward scales ----------
-    #   self.rewards.track_lin_vel_xy_exp.weight  -> lin_vel_reward_scale
-    #   self.rewards.track_ang_vel_z_exp.weight  -> yaw_rate_reward_scale
-    #   self.rewards.dof_torques_l2.weight       -> joint_torque_reward_scale
-    #   self.rewards.dof_acc_l2.weight           -> joint_accel_reward_scale
-    #   self.rewards.feet_air_time.weight        -> feet_air_time_reward_scale
-    #   self.rewards.undesired_contacts=None     -> undesired_contact_reward_scale = 0.0
-
-    lin_vel_reward_scale: float = 5.0
-    yaw_rate_reward_scale: float = 0.75
-    joint_torque_reward_scale: float = -2.0e-4
-    joint_accel_reward_scale: float = -2.5e-7
-    feet_air_time_reward_scale: float = 0.01
-    undesired_contact_reward_scale: float = 0.0
-    # base_height_reward_scale: float = 1.0
-    # base_height_below_penalty_scale: float = -5.0
-    z_vel_reward_scale: float = -2.0
-    ang_vel_reward_scale: float = -0.05
-    action_rate_reward_scale: float = -0.01
-    flat_orientation_reward_scale: float = -5.0
 
