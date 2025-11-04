@@ -22,8 +22,7 @@ import omni.timeline
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
 from .rewards import compute_all_rewards
-from .terminations import illegal_contact, out_of_bounds, time_out, bad_orientation
-
+from .terminations import illegal_contact, out_of_bounds, time_out
 
 class Go2HybridEnv(DirectRLEnv):
     
@@ -140,6 +139,24 @@ class Go2HybridEnv(DirectRLEnv):
                 ),
             },
         )
+
+        _vel_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/VelMarkers",
+            markers={
+                "cmd_arrow": sim_utils.UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                    scale=(0.3, 0.3, 0.8),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                ),
+                "output_arrow": sim_utils.UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                    scale=(0.3, 0.3, 0.8),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
+                ),
+            },            
+        )
+
+
         _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         translations = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)  # shape (1,3)
         _origin_debug_marker.visualize(translations=translations)
@@ -151,6 +168,8 @@ class Go2HybridEnv(DirectRLEnv):
         self._lidar_origin_debug_marker = VisualizationMarkers(_lidar_origin_debug_marker_cfg)
         self._lidar_origin_marker_type = list(_lidar_origin_debug_marker_cfg.markers.keys())  # ['lidar_origin_box']
         self._lidar_origin_marker_indices = torch.tensor([0], device=self.device)  # 1 marker
+
+        self._vel_markers = VisualizationMarkers(_vel_marker_cfg)
 
         #----------------------------------------------#
 
@@ -173,7 +192,7 @@ class Go2HybridEnv(DirectRLEnv):
         if actions is not None and actions.numel() > 0:
             self._actions = actions.clone()
 
-        action_scale = getattr(self.cfg, "action_scale", 0.5)  # default if not set in cfg
+        action_scale = getattr(self.cfg, "action_scale", 0.15)  # default if not set in cfg
         self._processed_actions = action_scale * self._actions + self._robot.data.default_joint_pos
 
 
@@ -208,6 +227,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         # self._visualize_roi_box()
         # self._visualize_lidar_origin()
+        self._visualize_velocity_arrows()
 
         # if self._step_counter % 50 == 0:  # every 100 steps
         #     #self.plot_lidar_3d(env_id=0, show_history=False)
@@ -225,46 +245,32 @@ class Go2HybridEnv(DirectRLEnv):
             self._episode_sums[k] += v
         return total
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]: 
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute episode termination signals (orientation, contact, bounds, timeout)."""
+
+        # --- Individual terminations ---
         time_outs = time_out(self)
-        #bad_orient = bad_orientation(self, limit_angle=2.2)
-        # base_contact = illegal_contact(self, threshold=1.0, body_names=["base","Head_lower", "Head_upper"])
-        base_contact = illegal_contact(self, threshold=1.0, body_names=["base"])
-        oob = out_of_bounds(self, margin=0.2)
+        base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
+        oob = out_of_bounds(self, margin=0.5)
+
+        # --- Combine ---
         terminated = base_contact | oob
 
-                # --- Debug prints (only for early steps or when something triggers) ---
-        if torch.any(terminated):
-            num_contact = torch.count_nonzero(base_contact).item()
-            #num_orient  = torch.count_nonzero(bad_orient).item()
-            num_timeout = torch.count_nonzero(time_outs).item()
-            num_oob = torch.count_nonzero(oob).item()
+        # --- Optional Debug ---
+        # if torch.any(terminated):
+        #     num_contact = torch.count_nonzero(base_contact).item()
+        #     num_oob = torch.count_nonzero(oob).item()
+        #     num_timeout = torch.count_nonzero(time_outs).item()
 
-            if num_oob > 0:
-                triggered = torch.nonzero(oob).squeeze(-1).tolist()
-                print(f"Out-of-bounds triggered in envs: {triggered}")
-
-            # print(f"[STEP {self._step_counter:04d}] "
-            #     f"Terminated: {torch.count_nonzero(terminated).item()} | "
-            #     f"BaseContact={num_contact}, BadOrient={num_orient}, Timeout={num_timeout}")
+        #     print(
+        #         f"[STEP {self._step_counter:05d}] Terminated={torch.count_nonzero(terminated).item()} | "
+        #         f"BaseContact={num_contact}, OOB={num_oob}, Timeout={num_timeout}"
+        #     )
 
 
-            # print(f"[STEP {self._step_counter:04d}] "
-            #     f"Terminated: {torch.count_nonzero(terminated).item()} | "
-            #     f"BaseContact={num_contact}, Timeout={num_timeout}")
+        return terminated, time_outs
 
-            # Optional: print which envs specifically triggered each
-            # if num_contact > 0:
-            #     triggered = torch.nonzero(base_contact).squeeze(-1).tolist()
-            #     print(f"Base contact triggered in envs: {triggered}")
-            # if num_orient > 0:
-            #     triggered = torch.nonzero(bad_orient).squeeze(-1).tolist()
-            #     print(f"Bad orientation triggered in envs: {triggered}")
-            # if num_timeout > 0:
-            #     triggered = torch.nonzero(time_outs).squeeze(-1).tolist()
-            #     print(f"Timeout triggered in envs: {triggered}")
 
-        return time_outs, terminated
    
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -562,5 +568,73 @@ class Go2HybridEnv(DirectRLEnv):
 
         # Visualize (position only; orientation ignored for sphere)
         self._lidar_origin_debug_marker.visualize(translations=translations, marker_indices=self._lidar_origin_marker_indices)
+
+    def _visualize_velocity_arrows(self, env_ids=None,
+                                base_marker_scale=(0.5,0.5,0.5),
+                                scale_mult=3.0,
+                                height_offset=0.3):
+        import torch
+        from isaaclab.utils.math import quat_apply, quat_mul
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        M = env_ids.shape[0]
+
+        base_pos = self._robot.data.root_pos_w[env_ids]
+        base_quat = self._robot.data.root_quat_w[env_ids]
+
+        offset = torch.tensor([0.,0.,height_offset], device=self.device)
+        marker_pos = base_pos + offset.unsqueeze(0)
+
+        # --- Command (green) arrow ---
+        cmd_body = torch.zeros((M,3), device=self.device)
+        cmd_body[:,0] = self._commands[env_ids,0]
+        cmd_body[:,1] = self._commands[env_ids,1]
+        cmd_world = quat_apply(base_quat, cmd_body)
+        cmd_xy = cmd_world[:,:2]
+        cmd_speed = torch.norm(cmd_xy, dim=1)
+
+        yaw_cmd = torch.atan2(cmd_xy[:,1], cmd_xy[:,0])
+        quat_local_cmd = torch.cat([
+            torch.cos(yaw_cmd/2).unsqueeze(1),
+            torch.zeros((M,2), device=self.device),
+            torch.sin(yaw_cmd/2).unsqueeze(1)
+        ], dim=1)
+        arrow_quat_cmd = quat_mul(base_quat, quat_local_cmd)
+
+        arrow_scale_cmd = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M,1)
+        # arrow_scale_cmd[:,0] *= cmd_speed * scale_mult
+
+        # --- Output (blue) arrow ---
+        vel_body_xy = self._robot.data.root_lin_vel_b[env_ids,:2]
+        vel_speed = torch.norm(vel_body_xy, dim=1)
+        yaw_out = torch.atan2(vel_body_xy[:,1], vel_body_xy[:,0])
+        quat_local_out = torch.cat([
+            torch.cos(yaw_out/2).unsqueeze(1),
+            torch.zeros((M,2), device=self.device),
+            torch.sin(yaw_out/2).unsqueeze(1)
+        ], dim=1)
+        arrow_quat_out = quat_mul(base_quat, quat_local_out)
+
+        arrow_scale_out = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M,1)
+        arrow_scale_out[:,0] *= vel_speed * scale_mult
+
+        # Stack everything
+        translations = torch.cat([marker_pos, marker_pos], dim=0)
+        orientations = torch.cat([arrow_quat_cmd, arrow_quat_out], dim=0)
+        scales       = torch.cat([arrow_scale_cmd, arrow_scale_out], dim=0)
+
+        marker_indices = torch.cat([
+            torch.zeros(M, dtype=torch.int32, device=self.device),
+            torch.ones(M,  dtype=torch.int32, device=self.device)
+        ], dim=0)
+
+        self._vel_markers.visualize(
+            translations = translations.cpu().numpy(),
+            orientations = orientations.cpu().numpy(),
+            scales       = scales.cpu().numpy(),
+            marker_indices= marker_indices.cpu().numpy()
+        )
+
+
 
 

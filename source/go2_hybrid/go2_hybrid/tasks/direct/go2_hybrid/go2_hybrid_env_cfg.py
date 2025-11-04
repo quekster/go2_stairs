@@ -19,7 +19,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     episode_length_s = 20.0
     decimation = 4
     action_space = 12          # Unitree Go2 typically 12 actuated joints
-    observation_space = 1398    # will be validated at runtime 21648 
+    observation_space = 1398    # will be validated at runtime 
     state_space = 0
     dt=0.005
 

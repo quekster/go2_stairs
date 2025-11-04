@@ -17,9 +17,13 @@ def forward_progress(env) -> torch.Tensor:
     return env._robot.data.root_lin_vel_b[:, 0].clip(min=0.0)
 
 def flat_orientation(env) -> torch.Tensor:
-    """Reward staying upright (projected gravity close to z)."""
-    gravity_b = env._robot.data.projected_gravity_b
-    return gravity_b[:, 2]  # cos(theta), higher is better
+    """Reward staying upright (body z-axis aligned with world +z)."""
+    # gravity_b = env._robot.data.projected_gravity_b  # projected gravity in body frame
+    # # Upright gives cos(theta) ≈ 1, upside-down gives cos(theta) ≈ -1
+    # uprightness = gravity_b[:, 2]
+    result = torch.sum(torch.square(env._robot.data.projected_gravity_b[:, :2]), dim=1)
+    return result
+
 
 def lin_vel_z_penalty(env) -> torch.Tensor:
     return torch.square(env._robot.data.root_lin_vel_b[:, 2])
@@ -75,18 +79,18 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        "track_lin_vel_xy_exp": 8.0,        # was 4.0
-        "track_ang_vel_z_exp": 1.0,         # slightly higher
-        "forward_progress": 2.0,            # explicit forward motion bonus
-        "flat_orientation": 2.0,            # reward uprightness
-        "lin_vel_z_penalty": -1.0,
-        "ang_vel_xy_penalty": -0.2,
-        "joint_torque_penalty": -0.0001,    # smaller penalty to encourage movement
-        "joint_acc_penalty": -1e-6,
-        "action_rate_penalty": -0.005,
-        "feet_air_time": 0.2,
-        "undesired_contacts": -2.0,
-        "energy_penalty": -2e-5,
+        "track_lin_vel_xy_exp": 1.0,
+        "track_ang_vel_z_exp": 0.5,
+        "forward_progress": 0.5,
+        "flat_orientation": -5.0,
+        "lin_vel_z_penalty": -2.0,
+        "ang_vel_xy_penalty": -0.05,
+        "joint_torque_penalty": -2.5e-5,
+        "joint_acc_penalty": -2.5e-7,
+        "action_rate_penalty": -0.01,
+        "feet_air_time": 0.5,
+        "undesired_contacts": -1.0,
+        "energy_penalty": -0.000001,
     }
 
     dt = env.step_dt
