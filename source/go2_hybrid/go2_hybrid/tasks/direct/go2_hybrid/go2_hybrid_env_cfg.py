@@ -132,5 +132,3 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         history_length=0,
         debug_vis=False,
     )
-    
-

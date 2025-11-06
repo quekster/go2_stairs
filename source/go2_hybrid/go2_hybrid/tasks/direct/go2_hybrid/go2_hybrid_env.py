@@ -61,8 +61,6 @@ class Go2HybridEnv(DirectRLEnv):
             for key in [
                 "track_lin_vel_xy_exp",
                 "track_ang_vel_z_exp",
-                "forward_progress",
-                "flat_orientation",
                 "lin_vel_z_penalty",
                 "ang_vel_xy_penalty",
                 "joint_torque_penalty",
@@ -70,7 +68,13 @@ class Go2HybridEnv(DirectRLEnv):
                 "action_rate_penalty",
                 "feet_air_time",
                 "undesired_contacts",
+                "forward_progress",
+                "flat_orientation",
                 "energy_penalty",
+                "feet_slide_penalty",
+                "body_height_reward",
+                "body_height_penalty",
+                "foot_clearance_reward",
             ]
         }
 
@@ -82,6 +86,8 @@ class Go2HybridEnv(DirectRLEnv):
 
         # thighs (undesired contacts): explicit four thighs
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh'])
+
+
 
 
     def _setup_scene(self):
@@ -145,12 +151,12 @@ class Go2HybridEnv(DirectRLEnv):
             markers={
                 "cmd_arrow": sim_utils.UsdFileCfg(
                     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.3, 0.3, 0.8),
+                    scale=(0.5, 0.5, 0.5),
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
                 ),
                 "output_arrow": sim_utils.UsdFileCfg(
                     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.3, 0.3, 0.8),
+                    scale=(0.5, 0.5, 0.5),
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
                 ),
             },            
@@ -226,7 +232,7 @@ class Go2HybridEnv(DirectRLEnv):
         # print("------------------NEXT STEP------------------")
 
         # self._visualize_roi_box()
-        # self._visualize_lidar_origin()
+        self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
 
         # if self._step_counter % 50 == 0:  # every 100 steps
@@ -569,70 +575,63 @@ class Go2HybridEnv(DirectRLEnv):
         # Visualize (position only; orientation ignored for sphere)
         self._lidar_origin_debug_marker.visualize(translations=translations, marker_indices=self._lidar_origin_marker_indices)
 
-    def _visualize_velocity_arrows(self, env_ids=None,
-                                base_marker_scale=(0.5,0.5,0.5),
-                                scale_mult=3.0,
-                                height_offset=0.3):
+    def _visualize_velocity_arrows(
+        self,
+        env_ids=None,
+        base_marker_scale=(0.5, 0.5, 0.5),
+        scale_mult=3.0,
+        height_offset=0.3,
+    ):
         import torch
-        from isaaclab.utils.math import quat_apply, quat_mul
+        import numpy as np
+        from isaaclab.utils.math import quat_mul, quat_from_euler_xyz
+
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
         M = env_ids.shape[0]
 
-        base_pos = self._robot.data.root_pos_w[env_ids]
-        base_quat = self._robot.data.root_quat_w[env_ids]
+        base_pos_w = self._robot.data.root_pos_w[env_ids].clone()
+        base_quat_w = self._robot.data.root_quat_w[env_ids]
+        base_pos_w[:, 2] += height_offset
 
-        offset = torch.tensor([0.,0.,height_offset], device=self.device)
-        marker_pos = base_pos + offset.unsqueeze(0)
+        default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
+        # ================= Command (green) arrow =================
+        cmd_xy = self._commands[env_ids, :2]
+        cmd_speed = torch.linalg.norm(cmd_xy, dim=1)
+        arrow_scale_cmd = default_scale.clone()
+        arrow_scale_cmd[:, 0] *= cmd_speed * scale_mult
 
-        # --- Command (green) arrow ---
-        cmd_body = torch.zeros((M,3), device=self.device)
-        cmd_body[:,0] = self._commands[env_ids,0]
-        cmd_body[:,1] = self._commands[env_ids,1]
-        cmd_world = quat_apply(base_quat, cmd_body)
-        cmd_xy = cmd_world[:,:2]
-        cmd_speed = torch.norm(cmd_xy, dim=1)
+        heading_cmd = torch.atan2(cmd_xy[:, 1], cmd_xy[:, 0])
+        zeros = torch.zeros_like(heading_cmd)
+        arrow_quat_local_cmd = quat_from_euler_xyz(zeros, zeros, heading_cmd)
+        arrow_quat_cmd = quat_mul(base_quat_w, arrow_quat_local_cmd)
 
-        yaw_cmd = torch.atan2(cmd_xy[:,1], cmd_xy[:,0])
-        quat_local_cmd = torch.cat([
-            torch.cos(yaw_cmd/2).unsqueeze(1),
-            torch.zeros((M,2), device=self.device),
-            torch.sin(yaw_cmd/2).unsqueeze(1)
-        ], dim=1)
-        arrow_quat_cmd = quat_mul(base_quat, quat_local_cmd)
+        # ================= Output (blue) arrow =================
+        vel_body_xy = self._robot.data.root_lin_vel_b[env_ids, :2]
+        vel_speed = torch.linalg.norm(vel_body_xy, dim=1)
+        arrow_scale_out = default_scale.clone()
+        arrow_scale_out[:, 0] *= vel_speed * scale_mult
 
-        arrow_scale_cmd = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M,1)
-        # arrow_scale_cmd[:,0] *= cmd_speed * scale_mult
+        heading_out = torch.atan2(vel_body_xy[:, 1], vel_body_xy[:, 0])
+        arrow_quat_local_out = quat_from_euler_xyz(zeros, zeros, heading_out)
+        arrow_quat_out = quat_mul(base_quat_w, arrow_quat_local_out)
 
-        # --- Output (blue) arrow ---
-        vel_body_xy = self._robot.data.root_lin_vel_b[env_ids,:2]
-        vel_speed = torch.norm(vel_body_xy, dim=1)
-        yaw_out = torch.atan2(vel_body_xy[:,1], vel_body_xy[:,0])
-        quat_local_out = torch.cat([
-            torch.cos(yaw_out/2).unsqueeze(1),
-            torch.zeros((M,2), device=self.device),
-            torch.sin(yaw_out/2).unsqueeze(1)
-        ], dim=1)
-        arrow_quat_out = quat_mul(base_quat, quat_local_out)
-
-        arrow_scale_out = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M,1)
-        arrow_scale_out[:,0] *= vel_speed * scale_mult
-
-        # Stack everything
-        translations = torch.cat([marker_pos, marker_pos], dim=0)
+        # ================= Merge for single visualize() call =================
+        translations = torch.cat([base_pos_w, base_pos_w], dim=0)
         orientations = torch.cat([arrow_quat_cmd, arrow_quat_out], dim=0)
         scales       = torch.cat([arrow_scale_cmd, arrow_scale_out], dim=0)
 
         marker_indices = torch.cat([
-            torch.zeros(M, dtype=torch.int32, device=self.device),
-            torch.ones(M,  dtype=torch.int32, device=self.device)
+            torch.zeros(M, dtype=torch.int32, device=self.device),  # prototype 0 = cmd_arrow
+            torch.ones(M,  dtype=torch.int32, device=self.device),  # prototype 1 = output_arrow
         ], dim=0)
 
+        # One unified call
         self._vel_markers.visualize(
-            translations = translations.cpu().numpy(),
-            orientations = orientations.cpu().numpy(),
-            scales       = scales.cpu().numpy(),
-            marker_indices= marker_indices.cpu().numpy()
+            translations=translations.cpu().numpy(),
+            orientations=orientations.cpu().numpy(),
+            scales=scales.cpu().numpy(),
+            marker_indices=marker_indices.cpu().numpy(),
         )
 
 
