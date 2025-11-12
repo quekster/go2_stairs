@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 import omni.timeline
+import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
 from .rewards import compute_all_rewards
@@ -41,10 +42,10 @@ class Go2HybridEnv(DirectRLEnv):
         self._ROI_box_width = 1.0      # metres sideways (y direction)
         self._ROI_box_height = 0.5     # metres up (z direction)
 
-        # self._roi_debug_markers = None
-        # self._roi_marker_type
-        # self._roi_marker_indices
-        
+        # Timers for command resampling
+        self._cmd_timer = torch.zeros(self.num_envs, device=self.device)
+        self._cmd_interval = torch.full((self.num_envs,), 10.0, device=self.device)  # seconds
+
 
         # action buffers (derived from Gym space for robustness)
         dim = gym.spaces.flatdim(self.single_action_space)
@@ -53,9 +54,9 @@ class Go2HybridEnv(DirectRLEnv):
         self._stand_height_ref = torch.zeros(self.num_envs, device=self.device)
 
         # X/Y linear velocity (body frame) + yaw rate commands
-        self._commands = torch.zeros(self.num_envs, 3, device=self.device)
+        self._commands = torch.zeros(self.num_envs, 4, device=self.device)
 
-        # logging buckets (same keys as AnymalC so your logs look familiar)
+        
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
@@ -70,11 +71,12 @@ class Go2HybridEnv(DirectRLEnv):
                 "undesired_contacts",
                 "forward_progress",
                 "flat_orientation",
-                "energy_penalty",
+                "joint_pos_limit",
+                # "energy_penalty",
                 "feet_slide_penalty",
-                "body_height_reward",
-                "body_height_penalty",
+                "base_height_penalty",
                 "foot_clearance_reward",
+                "track_heading_reward",
             ]
         }
 
@@ -193,31 +195,54 @@ class Go2HybridEnv(DirectRLEnv):
 
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        # cache previous actions and compute processed PD targets
         self._previous_actions = self._actions.clone()
-        if actions is not None and actions.numel() > 0:
+        if actions is not None:
             self._actions = actions.clone()
 
-        action_scale = getattr(self.cfg, "action_scale", 0.15)  # default if not set in cfg
+        # Advance command timer and resample as needed
+        self._cmd_timer += self.step_dt
+        need_resample = self._cmd_timer >= self._cmd_interval
+        if torch.any(need_resample):
+            self.resample_commands(need_resample.nonzero(as_tuple=False).squeeze(-1))
+            self._cmd_timer[need_resample] = 0.0
+            self._cmd_interval[need_resample] = torch.empty_like(
+                self._cmd_interval[need_resample]
+            ).uniform_(8.0, 12.0)
+
+        action_scale = getattr(self.cfg, "action_scale", 0.15)
         self._processed_actions = action_scale * self._actions + self._robot.data.default_joint_pos
+        
 
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
+        # Actor observations (realistic)
         lidar_obs = self.get_stacked_hits()
-        obs = torch.cat(
+        obs_policy = torch.cat(
             [
-                self._robot.data.root_lin_vel_b,                              # (N,3)
-                self._robot.data.root_ang_vel_b,                              # (N,3)
-                self._robot.data.projected_gravity_b,                         # (N,3)
-                self._commands,                                               # (N,3)
-                self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # (N,ndof)
-                self._robot.data.joint_vel,                                   # (N,ndof)
-                self._actions,                                                # (N,ndof)
+                self._robot.data.root_lin_vel_b,                  # (N,3) → vx, vy, vz
+                self._robot.data.root_ang_vel_b,                  # (N,3) → ωx, ωy, ωz
+                self._robot.data.projected_gravity_b,             # (N,3) → gx, gy, gz
+                self._commands,                                   # (N,4) → cmd_vx, cmd_vy, cmd_yaw_rate, heading
+                self._robot.data.joint_pos - self._robot.data.default_joint_pos, # (N,ndof) joint pos error
+                self._robot.data.joint_vel,                       # (N,ndof) joint velocities
+                self._actions,                                    # (N,ndof) previous actions
+                lidar_obs,                                        # (N, ...) lidar hits
+            ],
+            dim=-1,
+        )
 
-                lidar_obs
+        # Critic observations (privileged)
+        privileged = torch.cat(
+            [
+                obs_policy,
+                self._robot.data.root_pos_w,            # (N, 3)
+                self._robot.data.root_quat_w,           # (N, 4)
+                self._robot.data.applied_torque,        # (N, ndof)
+                self._contact_sensor.data.net_forces_w.reshape(self.num_envs, -1), # contacts
+                self._contact_sensor.data.last_air_time.reshape(self.num_envs, -1),
             ],
             dim=-1,
         )
@@ -231,8 +256,9 @@ class Go2HybridEnv(DirectRLEnv):
         # print(f"[DEBUG] Frame_t-2 hits: {lidar_obs[0].cpu().numpy()}")
         # print("------------------NEXT STEP------------------")
 
+        #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
         # self._visualize_roi_box()
-        self._visualize_lidar_origin()
+        #self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
 
         # if self._step_counter % 50 == 0:  # every 100 steps
@@ -241,8 +267,10 @@ class Go2HybridEnv(DirectRLEnv):
         #     hits_ds = self.get_hits_downsampled(hits_b)
         #     hits = self.get_hits_norm(hits_ds)
         #     print("Current hits:", hits)
-
-        return {"policy": obs}
+        return {
+            "policy": obs_policy,      # for actor network
+            "critic": privileged,      # for critic network
+        }
 
     def _get_rewards(self) -> torch.Tensor:
         total, terms = compute_all_rewards(self)
@@ -293,8 +321,12 @@ class Go2HybridEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
 
-        # sample new commands in [-1, 1] (same as AnymalC)
-        self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(-1.0, 1.0)
+        # # sample new commands in [-1, 1] (same as AnymalC)
+        # self._commands[env_ids, 0] = torch.zeros_like(self._commands[env_ids, 0]).uniform_(-1.0, 1.0)  # vx
+        # self._commands[env_ids, 1] = torch.zeros_like(self._commands[env_ids, 1]).uniform_(-1.0, 1.0)  # vy
+        # self._commands[env_ids, 2] = torch.zeros_like(self._commands[env_ids, 2]).uniform_(-1.0, 1.0)  # yaw rate
+        # self._commands[env_ids, 3] = torch.zeros_like(self._commands[env_ids, 3]).uniform_(-math.pi, math.pi)  # heading
+
 
         # reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -340,6 +372,51 @@ class Go2HybridEnv(DirectRLEnv):
             # zero‐out the buffer entries for reset envs
             self._lidar_buffer[env_ids] = 0.0
 
+        ################### Debug snippet to put into your environment class (e.g., in go2_hybrid_env.py)####################
+        # if self._step_counter == 0:
+        #     # 1) Print joint names → indices
+        #     joint_names = self._robot.data.joint_names  # tensor of strings or list
+        #     print("=== Joint index mapping ===")
+        #     for i, name in enumerate(joint_names):
+        #         print(f"joint index {i} -> name {name}")
+
+        #     # 2) Print first few values of observation vector for env_id 0
+        #     obs_full = self._get_observations()["policy"][0].cpu().numpy()
+        #     print("\n=== Observation vector (first 20 entries) ===")
+        #     for i in range(min(20, obs_full.shape[0])):
+        #         print(f"obs index {i} = {obs_full[i]:.4f}")
+
+        #     # 3) Apply known small lateral (y-direction) perturbation
+        #     # Set a command with vy != 0 forcing lateral motion
+        #     self._commands[0, :2] = torch.tensor([0.0, 0.5], device=self.device)  # vx=0, vy=0.5
+        #     self._commands[0, 2:] = torch.tensor([0.0, 0.0], device=self.device)   # yaw_rate=0
+        #     # Step environment for one step (you might call step once)
+        #     # (Assumes external step call; if inside env, step then print)
+        #     print("\n-- After lateral command (vy=0.5) --")
+        #     obs2 = self._get_observations()["policy"][0].cpu().numpy()
+        #     for i in range(min(20, obs2.shape[0])):
+        #         if abs(obs2[i] - obs_full[i]) > 1e-3:
+        #             print(f"obs index {i} changed from {obs_full[i]:.4f} → {obs2[i]:.4f}")
+
+        #     # 4) Apply small yaw rate command
+        #     self._commands[0, :2] = torch.tensor([0.0, 0.0], device=self.device)
+        #     self._commands[0, 2]  = 0.3  # yaw_rate
+        #     print("\n-- After yaw_rate command (yaw_rate=0.3) --")
+        #     obs3 = self._get_observations()["policy"][0].cpu().numpy()
+        #     for i in range(min(20, obs3.shape[0])):
+        #         if abs(obs3[i] - obs2[i]) > 1e-3:
+        #             print(f"obs index {i} changed from {obs2[i]:.4f} → {obs3[i]:.4f}")
+
+        ################################################
+
+
+        # --- Immediately sample a new command at episode start ---
+        self.resample_commands(env_ids)
+
+        # Reset command timers so resampling happens after ~10s, not before
+        self._cmd_timer[env_ids] = 0.0
+        self._cmd_interval[env_ids] = torch.empty_like(self._cmd_interval[env_ids]).uniform_(8.0, 12.0)
+
 
         # episode logs (averaged over the just-reset envs)
         extras = dict()
@@ -354,6 +431,26 @@ class Go2HybridEnv(DirectRLEnv):
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
+
+    def resample_commands(self, env_ids: torch.Tensor):
+        num_envs = len(env_ids)
+
+        # sample random heading
+        heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
+        self._commands[env_ids, 3] = heading
+
+        # sample linear speed and direction relative to heading
+        speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+        direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi/6, math.pi/6)  # ±30° cone
+
+        # world-frame velocities aligned with heading
+        vx_world = speed * torch.cos(heading + direction_offset)
+        vy_world = speed * torch.sin(heading + direction_offset)
+        yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+
+        self._commands[env_ids, 0] = vx_world
+        self._commands[env_ids, 1] = vy_world
+        self._commands[env_ids, 2] = yaw_rate
 
 
     def get_bf_hits(self, env_ids=None):
@@ -595,16 +692,28 @@ class Go2HybridEnv(DirectRLEnv):
         base_pos_w[:, 2] += height_offset
 
         default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
+        
         # ================= Command (green) arrow =================
-        cmd_xy = self._commands[env_ids, :2]
-        cmd_speed = torch.linalg.norm(cmd_xy, dim=1)
+        # Rotate commanded (vx, vy) by heading to match body-frame intent
+        heading = self._commands[env_ids, 3]
+        cos_h = torch.cos(heading)
+        sin_h = torch.sin(heading)
+
+        vx = self._commands[env_ids, 0]
+        vy = self._commands[env_ids, 1]
+        vx_rot = cos_h * vx + sin_h * vy
+        vy_rot = -sin_h * vx + cos_h * vy
+        cmd_body = torch.stack((vx_rot, vy_rot), dim=1)
+
+        cmd_speed = torch.linalg.norm(cmd_body, dim=1)
         arrow_scale_cmd = default_scale.clone()
         arrow_scale_cmd[:, 0] *= cmd_speed * scale_mult
 
-        heading_cmd = torch.atan2(cmd_xy[:, 1], cmd_xy[:, 0])
+        heading_cmd = torch.atan2(cmd_body[:, 1], cmd_body[:, 0])
         zeros = torch.zeros_like(heading_cmd)
         arrow_quat_local_cmd = quat_from_euler_xyz(zeros, zeros, heading_cmd)
         arrow_quat_cmd = quat_mul(base_quat_w, arrow_quat_local_cmd)
+
 
         # ================= Output (blue) arrow =================
         vel_body_xy = self._robot.data.root_lin_vel_b[env_ids, :2]
