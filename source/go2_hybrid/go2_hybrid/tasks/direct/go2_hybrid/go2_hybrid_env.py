@@ -69,7 +69,7 @@ class Go2HybridEnv(DirectRLEnv):
                 "action_rate_penalty",
                 "feet_air_time",
                 "undesired_contacts",
-                "forward_progress",
+                # "forward_progress",
                 "flat_orientation",
                 "joint_pos_limit",
                 # "energy_penalty",
@@ -77,6 +77,7 @@ class Go2HybridEnv(DirectRLEnv):
                 "base_height_penalty",
                 "foot_clearance_reward",
                 "track_heading_reward",
+                "stand_still_joint_deviation_l1",
             ]
         }
 
@@ -166,7 +167,7 @@ class Go2HybridEnv(DirectRLEnv):
 
 
         _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
-        translations = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)  # shape (1,3)
+        translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
         _origin_debug_marker.visualize(translations=translations)
 
         self._roi_debug_markers = VisualizationMarkers(self._ROI_debug_marker_cfg)

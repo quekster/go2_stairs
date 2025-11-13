@@ -49,7 +49,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         #terrain_type="generator",
         #terrain_generator=terrain_gen,
         terrain_type="plane",
-        #usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_colour.usdz",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_18_colour.usdz",
         
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -87,7 +87,6 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
                 ".*L_hip_joint": 0.1,
                 ".*R_hip_joint": -0.1,
                 "F[L,R]_thigh_joint": 0.8,
-                # "F[L,R]_thigh_joint": 0.4,
                 "R[L,R]_thigh_joint": 1.0,
                 ".*_calf_joint": -1.5,
             },

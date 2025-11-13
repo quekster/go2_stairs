@@ -62,7 +62,7 @@ def _transform_policy_obs_left_right(obs: torch.Tensor, ndof: int) -> torch.Tens
     x = obs.clone()
     device = x.device
 
-    # Fixed segment boundaries
+    # Fixed segment boundaries based on my own observation structure
     i = 0
     lin_vel = slice(i, i+3); i += 3
     ang_vel = slice(i, i+3); i += 3

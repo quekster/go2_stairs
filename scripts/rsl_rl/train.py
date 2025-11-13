@@ -110,10 +110,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    # ensure resume survives argparse overwrite
+    if getattr(args_cli, "resume", False):
+        agent_cfg.resume = True
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -127,8 +131,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         # set seed to have diversity in different threads
         seed = agent_cfg.seed + app_launcher.local_rank
-        env_cfg.seed = seed
+        env_cfg.seed = seed 
         agent_cfg.seed = seed
+
+    #Bellow
+    print(f"[DEBUG] agent.resume={agent_cfg.resume}")
+    print(f"[DEBUG] agent.load_run={agent_cfg.load_run}")
+    print(f"[DEBUG] agent.load_checkpoint={agent_cfg.load_checkpoint}")    
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

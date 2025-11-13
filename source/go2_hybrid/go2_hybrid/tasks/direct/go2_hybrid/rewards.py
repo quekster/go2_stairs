@@ -3,11 +3,6 @@ import torch
 from typing import Dict, Tuple
 import math
 
-# def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
-#     """Reward tracking of commanded linear velocity (x,y)."""
-#     lin_vel_err = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
-#     return torch.exp(-lin_vel_err / std2)
-
 def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded linear velocity (x,y) in body frame."""
     cmd_body = get_heading_rotated_commands(env)
@@ -168,6 +163,15 @@ def foot_clearance_reward(env, target_height: float = 0.10, std: float = 0.05, t
     reward = foot_z_error*foot_vel_tanh
     return torch.exp(-torch.sum(reward, dim=1) / (2 * std**2))
 
+def stand_still_joint_deviation_l1(env, command_threshold: float = 0.06) -> torch.Tensor:
+    """Penalize offsets from the default joint positions when the command is very small."""
+    commands = env._commands # [num_envs, 4]: [vx, vy, yaw_rate, heading]
+    joint_dev = torch.sum(torch.abs(env._robot.data.joint_pos - env._robot.data.default_joint_pos), dim=1) # L1 deviation per environment (sum over all joints)
+    cmd_mag = torch.norm(commands[:, :2], dim=1) # magnitude of (vx, vy) command
+    return joint_dev * (cmd_mag < command_threshold)
+
+
+
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
         "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
@@ -179,14 +183,15 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "action_rate_penalty": action_rate_penalty(env),
         "feet_air_time": feet_air_time(env),
         "undesired_contacts": undesired_contacts(env),
-        "forward_progress": forward_progress(env),
+        # "forward_progress": forward_progress(env),
         "flat_orientation": flat_orientation(env),
         "joint_pos_limit": joint_pos_limits(env),  # <-- NEW
         # "energy_penalty": energy_penalty(env),
         "feet_slide_penalty": feet_slide(env),
         "base_height_penalty": base_height_penalty(env),
         "foot_clearance_reward": foot_clearance_reward(env, target_height=0.10),
-        "track_heading_reward": track_heading_reward(env)
+        "track_heading_reward": track_heading_reward(env),
+        "stand_still_joint_deviation_l1": stand_still_joint_deviation_l1(env),
 
     }
 
@@ -194,22 +199,22 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     w = {
         "track_lin_vel_xy_exp": 2.0,
         "track_ang_vel_z_exp": 0.7,
-        "forward_progress": 0.5,
+        # "forward_progress": 0.5,
         "ang_vel_xy_penalty": -0.05,
         "joint_torque_penalty": -2.0e-5,
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.5,
-        "feet_air_time": 0.2,
+        "feet_air_time": 0.4,
         "undesired_contacts": -1.0,
         "flat_orientation": -4.0,
         "lin_vel_z_penalty": -2.0,
         # "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.1,
-        "base_height_penalty": -5.0,
-        "foot_clearance_reward": 0.2,
+        "base_height_penalty": -6.5,
+        "foot_clearance_reward": 0.5,
         "track_heading_reward": 0.1,
         "joint_pos_limit": -0.4,
-
+        "stand_still_joint_deviation_l1": -0.4,
     }
 
     dt = env.step_dt
