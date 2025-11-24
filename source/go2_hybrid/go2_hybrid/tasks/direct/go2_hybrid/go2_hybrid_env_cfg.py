@@ -41,15 +41,46 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     # ---------- scene ----------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200, env_spacing=1.0, replicate_physics=True
+        num_envs=200, env_spacing=0.0, replicate_physics=True
+    )
+
+    terrain_gen= TerrainGeneratorCfg(
+        size=(6.0, 6.0),
+        border_width=0.0,
+        num_rows=9,
+        num_cols=9,
+        horizontal_scale=0.1,
+        vertical_scale=0.005,
+        slope_threshold=0.75,
+        use_cache=False,
+        sub_terrains={
+            "pyramid_stairs": MeshPyramidStairsTerrainCfg(
+                proportion=1.0,
+                step_height_range=(0.18, 0.20),
+                step_width=0.3,
+                platform_width=2.0,
+                platform_height=1.5,
+                border_width=1.0,
+                holes=False,
+            ),
+            # "pyramid_stairs_inv": MeshInvertedPyramidStairsTerrainCfg(
+            #     proportion=0.5,
+            #     step_height_range=(0.18, 0.20),
+            #     step_width=0.3,
+            #     platform_width=2.0,
+            #     platform_height=1.5,
+            #     border_width=1.0,
+            #     holes=False,
+            # ),
+        },
     )
 
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
-        #terrain_type="generator",
-        #terrain_generator=terrain_gen,
-        terrain_type="plane",
-        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_18_colour.usdz",
+        # terrain_type="generator",
+        # terrain_generator=terrain_gen,
+        terrain_type="usd",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_10_colour.usdz",
         
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -118,13 +149,13 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_contact_data_count_per_prim=20,
     )
 
-    height_scanner=RayCasterCfg(
+    lidar_scanner=RayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/Head_upper",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.1)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
             channels=5,
-            vertical_fov_range= [-50,-10], horizontal_fov_range=[-45,45], horizontal_res=2.0
+            vertical_fov_range= [-52,-10], horizontal_fov_range=[-45,45], horizontal_res=2.0
         ),
         mesh_prim_paths=["/World/Terrain"],
         update_period=0.0,

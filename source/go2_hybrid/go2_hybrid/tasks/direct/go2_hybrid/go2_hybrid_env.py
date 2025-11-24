@@ -44,8 +44,11 @@ class Go2HybridEnv(DirectRLEnv):
 
         # Timers for command resampling
         self._cmd_timer = torch.zeros(self.num_envs, device=self.device)
-        self._cmd_interval = torch.full((self.num_envs,), 10.0, device=self.device)  # seconds
+        self._cmd_interval = torch.full((self.num_envs,), 15.0, device=self.device)  # seconds
 
+        #Phase 1: Stairs Terrain - Goal -> top of stairs
+        self._goal_pos = torch.tensor([0.0, 0.0, 1.1], device=self.device)
+        self._prev_goal_dist = torch.zeros(self.num_envs, device=self.device)
 
         # action buffers (derived from Gym space for robustness)
         dim = gym.spaces.flatdim(self.single_action_space)
@@ -57,27 +60,46 @@ class Go2HybridEnv(DirectRLEnv):
         self._commands = torch.zeros(self.num_envs, 4, device=self.device)
 
         
+        # Episode reward tracking (matches compute_all_rewards in rewards.py)
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
+                # Tracking rewards
                 "track_lin_vel_xy_exp",
                 "track_ang_vel_z_exp",
+                "track_heading_reward",
+                
+                # Core locomotion penalties
                 "lin_vel_z_penalty",
                 "ang_vel_xy_penalty",
+                "action_rate_penalty",
                 "joint_torque_penalty",
                 "joint_acc_penalty",
-                "action_rate_penalty",
+                
+                # Foot contact rewards
                 "feet_air_time",
-                "undesired_contacts",
-                # "forward_progress",
-                "flat_orientation",
-                "joint_pos_limit",
-                # "energy_penalty",
                 "feet_slide_penalty",
-                "base_height_penalty",
-                "foot_clearance_reward",
-                "track_heading_reward",
-                "stand_still_joint_deviation_l1",
+                "undesired_contacts",
+                
+                # Joint limits
+                "joint_pos_limit",
+                
+                # Stairs-specific rewards
+                "thigh_lift",
+                "step_detection",
+                "hind_push",
+                "front_placement",
+                "body_height_progress",
+                "pitch_stability",
+                
+                # **NEW: Critical penalties**
+                "base_pitch_penalty",
+                "base_height_maintenance",
+                "front_foot_separation",
+                "rear_foot_separation",
+                
+                # Goal progress
+                "goal_progress",
             ]
         }
 
@@ -89,6 +111,11 @@ class Go2HybridEnv(DirectRLEnv):
 
         # thighs (undesired contacts): explicit four thighs
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh'])
+
+        # Define hind feet explicitly
+        self._hind_feet_ids = torch.tensor([self._feet_ids[2], self._feet_ids[3]], device=self.device)
+        self._hind_last_contact_pos = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self._hind_was_in_contact = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
 
 
 
@@ -104,8 +131,8 @@ class Go2HybridEnv(DirectRLEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        self._height_scanner=RayCaster(self.cfg.height_scanner)
-        self.scene.sensors["height_scanner"]=self._height_scanner
+        self._lidar_scanner=RayCaster(self.cfg.lidar_scanner)
+        self.scene.sensors["lidar_scanner"]=self._lidar_scanner
         self._lidar_buffer= None
         self._lidar_buffer_size = 2
 
@@ -165,7 +192,19 @@ class Go2HybridEnv(DirectRLEnv):
             },            
         )
 
-
+        # New Lookahead Marker
+        _lookahead_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/LookaheadMarker",
+            markers={
+                "lookahead_box": sim_utils.CuboidCfg(
+                    size=(0.05, 0.8, 0.3),  # thin box showing lookahead region
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 1.0, 0.0),  # yellow
+                        opacity=0.5  # semi-transparent
+                    ),
+                ),
+            },
+        )
         _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
         _origin_debug_marker.visualize(translations=translations)
@@ -179,6 +218,10 @@ class Go2HybridEnv(DirectRLEnv):
         self._lidar_origin_marker_indices = torch.tensor([0], device=self.device)  # 1 marker
 
         self._vel_markers = VisualizationMarkers(_vel_marker_cfg)
+
+        self._lookahead_marker = VisualizationMarkers(_lookahead_marker_cfg)
+        self._lookahead_marker_type = list(_lookahead_marker_cfg.markers.keys())  # ['lookahead_box']
+        self._lookahead_marker_indices = torch.tensor([0], device=self.device)  # 1 marker
 
         #----------------------------------------------#
 
@@ -258,26 +301,35 @@ class Go2HybridEnv(DirectRLEnv):
         # print("------------------NEXT STEP------------------")
 
         #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
+
+        #-----VISUALIZATIONS--------#
         # self._visualize_roi_box()
         #self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
+        #self._visualize_step_detection_zone()
 
-        # if self._step_counter % 50 == 0:  # every 100 steps
-        #     #self.plot_lidar_3d(env_id=0, show_history=False)
-        #     hits_b = self.get_bf_hits(torch.tensor([0], device=self.device))[0]
-        #     hits_ds = self.get_hits_downsampled(hits_b)
-        #     hits = self.get_hits_norm(hits_ds)
-        #     print("Current hits:", hits)
+
+        # if self._step_counter % 100 == 0:  # every 100 steps
+        #     self.plot_lidar_3d()
+            # hits_b = self.get_bf_hits(torch.tensor([0], device=self.device))[0]
+            # hits_ds = self.get_hits_downsampled(hits_b)
+            # hits = self.get_hits_norm(hits_ds)
+            # print("Current hits:", hits)
         return {
             "policy": obs_policy,      # for actor network
             "critic": privileged,      # for critic network
         }
 
     def _get_rewards(self) -> torch.Tensor:
+        """Compute rewards using centralized weight dictionary."""
         total, terms = compute_all_rewards(self)
-        # accumulate episodic sums for logging (same keys as terms)
+        
+        # Accumulate episodic sums for logging
         for k, v in terms.items():
+            if k not in self._episode_sums:
+                self._episode_sums[k] = torch.zeros(self.num_envs, device=self.device)
             self._episode_sums[k] += v
+        
         return total
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -285,12 +337,13 @@ class Go2HybridEnv(DirectRLEnv):
 
         # --- Individual terminations ---
         time_outs = time_out(self)
-        base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
+        base_contact = illegal_contact(self, threshold=5.0, body_names=["base", "Head_upper", "Head_lower"])
         oob = out_of_bounds(self, margin=0.5)
+    
 
         # --- Combine ---
         terminated = base_contact | oob
-
+        # terminated = base_contact
         # --- Optional Debug ---
         # if torch.any(terminated):
         #     num_contact = torch.count_nonzero(base_contact).item()
@@ -311,155 +364,141 @@ class Go2HybridEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
+        # Reset robot internal buffers
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
         if len(env_ids) == self.num_envs:
-            # stagger resets to avoid spikes
-            self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+            # stagger resets to avoid identical trajectories
+            self.episode_length_buf[:] = torch.randint_like(
+                self.episode_length_buf,
+                high=int(self.max_episode_length)
+            )
 
-        # clear actions
+        # Clear actions
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
 
-        # # sample new commands in [-1, 1] (same as AnymalC)
-        # self._commands[env_ids, 0] = torch.zeros_like(self._commands[env_ids, 0]).uniform_(-1.0, 1.0)  # vx
-        # self._commands[env_ids, 1] = torch.zeros_like(self._commands[env_ids, 1]).uniform_(-1.0, 1.0)  # vy
-        # self._commands[env_ids, 2] = torch.zeros_like(self._commands[env_ids, 2]).uniform_(-1.0, 1.0)  # yaw rate
-        # self._commands[env_ids, 3] = torch.zeros_like(self._commands[env_ids, 3]).uniform_(-math.pi, math.pi)  # heading
-
-
-        # reset robot state
+        # ===============================
+        # 1. Compute spawn pose (Phase 1)
+        # ===============================
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
-        default_root_state = self._robot.data.default_root_state[env_ids]
+        default_root_state = self._robot.data.default_root_state[env_ids].clone()
 
-        # Robot spawn position from terrain
+        # Terrain origin (but your USD stairs are the same for all envs)
         base_origin = self._terrain.env_origins[env_ids].clone()
 
-        # move a little backward from the first step (assuming stairs go +X)
+        # Move robot backward from first step and lift slightly
         base_origin[:, 0] -= 2.5
-        # lift robot slightly so it’s not intersecting the mesh
         base_origin[:, 2] += 0.4
 
 
-        # Add per-env origin if available (scene may expose env_origins)
-        origins = getattr(self.scene, "env_origins", None)
-        if origins is None:
-            origins = torch.zeros(self.num_envs, 3, device=self.device)
-        default_root_state[:, :3] += origins[env_ids]
-
-
-        default_root_state = self._robot.data.default_root_state[env_ids]
+        # Apply spawn pose to default root state
         default_root_state[:, :3] = base_origin
+
+        # Write pose/velocity to simulator
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # reference standing height per env (z of default pose + env origin z)
-        self._stand_height_ref[env_ids] = (self._robot.data.default_root_state[env_ids][:, 2] + origins[env_ids][:, 2])
+        # ===============================
+        # 2. Initialize goal-tracking distance
+        # ===============================
+        # IMPORTANT: must use base_origin (actual spawn), not default_root_state
+        base_pos = base_origin  # shape (N,3)
+        dist0 = torch.norm(self._goal_pos - base_pos, dim=1)
+        self._prev_goal_dist[env_ids] = dist0
 
-        # initialisation or clearing of lidar buffer for reset envs
+        # ===============================
+        # 3. Reference standing height
+        # ===============================
+        self._stand_height_ref[env_ids] = default_root_state[:, 2]
+
+        # ===============================
+        # Initialize reward tracking buffers
+        # ===============================
+        
+        # Body height progress tracking
+        if not hasattr(self, '_prev_body_height'):
+            self._prev_body_height = torch.zeros(self.num_envs, device=self.device)
+        self._prev_body_height[env_ids] = default_root_state[:, 2]
+        
+        # (Keep your existing _prev_foot_z, _hind_last_contact_pos, etc.)
+        
+        # --- Initialize previous foot heights for stair stepping reward ---
+        foot_z = self._robot.data.body_pos_w[env_ids][:, self._feet_ids, 2]  # shape: (N,4)
+        if not hasattr(self, "_prev_foot_z"):
+            # allocate tensor for all envs
+            self._prev_foot_z = torch.zeros(self.num_envs, 4, device=self.device)
+        # update only reset envs
+        self._prev_foot_z[env_ids] = foot_z.clone()
+
+        hind_pos = self._robot.data.body_pos_w[env_ids][:, self._hind_feet_ids, :]  # (n,2,3)
+        self._hind_last_contact_pos[env_ids] = hind_pos
+        self._hind_was_in_contact[env_ids] = False
+
+        # ===============================
+        # 4. Reset LiDAR buffer
+        # ===============================
         if self._lidar_buffer is None or self._lidar_buffer.shape[0] != self.num_envs:
-            # get number of rays by sampling current hits
-            hits0 = self._height_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
+            hits0 = self._lidar_scanner.data.ray_hits_w[env_ids]
             num_rays = hits0.shape[1]
-            # buffer shape: (num_envs, buffer_size, num_rays, 3)
             self._lidar_buffer = torch.zeros(
                 (self.num_envs, self._lidar_buffer_size, num_rays, 3),
                 dtype=hits0.dtype, device=self.device
             )
         else:
-            # zero‐out the buffer entries for reset envs
             self._lidar_buffer[env_ids] = 0.0
 
-        ################### Debug snippet to put into your environment class (e.g., in go2_hybrid_env.py)####################
-        # if self._step_counter == 0:
-        #     # 1) Print joint names → indices
-        #     joint_names = self._robot.data.joint_names  # tensor of strings or list
-        #     print("=== Joint index mapping ===")
-        #     for i, name in enumerate(joint_names):
-        #         print(f"joint index {i} -> name {name}")
-
-        #     # 2) Print first few values of observation vector for env_id 0
-        #     obs_full = self._get_observations()["policy"][0].cpu().numpy()
-        #     print("\n=== Observation vector (first 20 entries) ===")
-        #     for i in range(min(20, obs_full.shape[0])):
-        #         print(f"obs index {i} = {obs_full[i]:.4f}")
-
-        #     # 3) Apply known small lateral (y-direction) perturbation
-        #     # Set a command with vy != 0 forcing lateral motion
-        #     self._commands[0, :2] = torch.tensor([0.0, 0.5], device=self.device)  # vx=0, vy=0.5
-        #     self._commands[0, 2:] = torch.tensor([0.0, 0.0], device=self.device)   # yaw_rate=0
-        #     # Step environment for one step (you might call step once)
-        #     # (Assumes external step call; if inside env, step then print)
-        #     print("\n-- After lateral command (vy=0.5) --")
-        #     obs2 = self._get_observations()["policy"][0].cpu().numpy()
-        #     for i in range(min(20, obs2.shape[0])):
-        #         if abs(obs2[i] - obs_full[i]) > 1e-3:
-        #             print(f"obs index {i} changed from {obs_full[i]:.4f} → {obs2[i]:.4f}")
-
-        #     # 4) Apply small yaw rate command
-        #     self._commands[0, :2] = torch.tensor([0.0, 0.0], device=self.device)
-        #     self._commands[0, 2]  = 0.3  # yaw_rate
-        #     print("\n-- After yaw_rate command (yaw_rate=0.3) --")
-        #     obs3 = self._get_observations()["policy"][0].cpu().numpy()
-        #     for i in range(min(20, obs3.shape[0])):
-        #         if abs(obs3[i] - obs2[i]) > 1e-3:
-        #             print(f"obs index {i} changed from {obs2[i]:.4f} → {obs3[i]:.4f}")
-
-        ################################################
-
-
-        # --- Immediately sample a new command at episode start ---
-        self.resample_commands(env_ids)
-
-        # Reset command timers so resampling happens after ~10s, not before
+        # ===============================
+        # 5. Commands — Phase 1 (forward only)
+        # ===============================
+        self.resample_commands(env_ids)  # but restrict inside resample_commands()
         self._cmd_timer[env_ids] = 0.0
-        self._cmd_interval[env_ids] = torch.empty_like(self._cmd_interval[env_ids]).uniform_(8.0, 12.0)
+        self._cmd_interval[env_ids] = torch.empty_like(
+            self._cmd_interval[env_ids]
+        ).uniform_(8.0, 12.0)
 
-
-        # episode logs (averaged over the just-reset envs)
-        extras = dict()
+        # ===============================
+        # 6. Logging
+        # ===============================
+        extras = {}
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
-            extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s #to get per-second normalization - "how big each reward/penalty was per episode"
+            extras[f"Episode_Reward/{key}"] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
 
-        self.extras["log"] = dict()
+        self.extras["log"] = {}
         self.extras["log"].update(extras)
-        extras = dict()
-        extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
-        self.extras["log"].update(extras)
+        self.extras["log"]["Episode_Termination/base_contact"] = \
+            torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        self.extras["log"]["Episode_Termination/time_out"] = \
+            torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+
 
     def resample_commands(self, env_ids: torch.Tensor):
+        """Slower, forward-only commands for stairs climbing."""
         num_envs = len(env_ids)
-
-        # sample random heading
-        heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
-        self._commands[env_ids, 3] = heading
-
-        # sample linear speed and direction relative to heading
-        speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
-        direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi/6, math.pi/6)  # ±30° cone
-
-        # world-frame velocities aligned with heading
-        vx_world = speed * torch.cos(heading + direction_offset)
-        vy_world = speed * torch.sin(heading + direction_offset)
-        yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
-
-        self._commands[env_ids, 0] = vx_world
-        self._commands[env_ids, 1] = vy_world
+        
+        # Forward speed only (stairs curriculum)
+        vx = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+        vy = torch.zeros(num_envs, device=self.device)  # no lateral movement
+        yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.2, 0.2)
+        heading = torch.zeros(num_envs, device=self.device)  # face stairs
+        
+        self._commands[env_ids, 0] = vx
+        self._commands[env_ids, 1] = vy
         self._commands[env_ids, 2] = yaw_rate
-
+        self._commands[env_ids, 3] = heading
+        
 
     def get_bf_hits(self, env_ids=None):
         """Return all raw LiDAR hit points in base frame (metres). Also replaces NaNs with max range (70m)."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
 
-        hits_w = self._height_scanner.data.ray_hits_w[env_ids]
+        hits_w = self._lidar_scanner.data.ray_hits_w[env_ids]
         base_pos_w = self._robot.data.root_pos_w[env_ids]
         base_quat_w = self._robot.data.root_quat_w[env_ids]
 
@@ -536,15 +575,12 @@ class Go2HybridEnv(DirectRLEnv):
         stacked = buff[env_ids].reshape(N, B * R * 3)
         return stacked     
 
-    def plot_lidar_3d(self, env_id=0, frame="world", show_history=True):
+    def plot_lidar_3d(self, env_id=0):
         """
-        Visualize the 3D LiDAR point cloud for a given environment.
-        Can plot either a single frame or the full temporal stack from get_stacked_hits().
+        Visualize the 3D LiDAR point cloud for the current frame only.
 
         Args:
             env_id (int): Which environment to visualize.
-            frame (str): "world" or "base" (base recommended since your LiDAR is base-frame aligned).
-            show_history (bool): If True, use temporally stacked hits; else use current hits only.
         """
         import matplotlib.pyplot as plt
         import numpy as np
@@ -553,81 +589,75 @@ class Go2HybridEnv(DirectRLEnv):
         tl = omni.timeline.get_timeline_interface()
         tl.pause()
 
-        if show_history:
-            # Retrieve stacked LiDAR buffer (flattened)
-            stacked_hits = self.get_stacked_hits(torch.tensor([env_id], device=self.device))  # shape [1, B*R*3]
-            B = self._lidar_buffer_size
-            R = self._height_scanner.cfg.pattern_cfg.num_rays
-            hits = stacked_hits.view(B, R, 3).detach().cpu().numpy()  # [B, R, 3]
-
-            # Combine or colorize frames
-            colors = plt.cm.plasma(np.linspace(0, 1, B))  # color gradient for temporal frames
-        else:
-            # Single current frame (normalized)
-            hits = self.get_hits_norm(torch.tensor([env_id], device=self.device))[0].detach().cpu().numpy()
-            B = 1
-            colors = [plt.cm.plasma(0.5)]
-
-        # Remove invalid hits (NaNs or infs)
-        mask = np.isfinite(hits).all(axis=-1)
-        hits = np.where(mask[..., None], hits, np.nan)
-
-        # Create 3D scatter
-        fig = plt.figure(figsize=(8, 6))
-        ax = fig.add_subplot(111, projection="3d")
-
-        # --- ensure hits has shape [B, R, 3] ---
-        if hits.ndim == 2 and hits.shape[1] == 3:
-            # single frame -> add a temporal dimension
-            hits = hits[None, ...]        # [1, R, 3]
-            B = 1
-        elif hits.ndim == 1:
-            # completely flattened vector -> reshape to (-1, 3)
-            hits = hits.reshape(1, -1, 3)
-            B = 1
-        elif hits.ndim == 3:
-            # already correct shape [B, R, 3]
-            B = hits.shape[0]
-        else:
-            raise ValueError(f"Unexpected LiDAR hits shape: {hits.shape}")
+        # Get current frame hits in base frame
+        hits_b = self.get_bf_hits(torch.tensor([env_id], device=self.device))  # [1, R, 3]
+        hits_norm = self.get_hits_norm(hits_b).detach().cpu().numpy()  # [1, R, 3]
+        hits = hits_norm.squeeze(0)  # [R, 3]
         
-        hits = hits * self._lidar_range  # Uncomment to un-normalize for plotting
+        # Denormalize for visualization
+        hits_denorm = hits * self._lidar_range
 
-        # Plot each temporal frame
-        for b in range(B):
+        # Remove invalid hits
+        valid = np.isfinite(hits_denorm).all(axis=1)
+        if np.sum(valid) == 0:
+            print(f"[WARNING] No valid LiDAR hits at step {self._step_counter}")
+            tl.play()
+            return
 
-            valid = np.isfinite(hits[b]).all(axis=1)
-            if np.sum(valid) == 0:
-                continue
-            ax.scatter(
-                hits[b, valid, 0],  # x coords of valid hits in frame b
-                hits[b, valid, 1],  # y coords of valid hits in frame b
-                hits[b, valid, 2],  # z coords of valid hits in frame b
-                s=2,
-                c=[colors[b]] if B > 1 else hits[b, valid, 2],
-                cmap=None if B > 1 else "viridis",
-                label=f"frame {b}" if B > 1 else None,
-            )
-
+        # Create figure with subplots
+        fig = plt.figure(figsize=(16, 6))
         
-        ax.set_xlabel("X (normalized)")
-        ax.set_ylabel("Y (normalized)")
-        ax.set_zlabel("Z (normalized)")
-        title = f"LiDAR hits (stacked={show_history}) – Env {env_id}, Step {self._step_counter}"
-        ax.set_title(title)
+        # --- LEFT: 3D scatter ---
+        ax1 = fig.add_subplot(121, projection="3d")
+        
+        scatter = ax1.scatter(
+            hits_denorm[valid, 0],
+            hits_denorm[valid, 1],
+            hits_denorm[valid, 2],
+            c=hits_denorm[valid, 2],  # color by height
+            cmap='viridis',
+            s=3,
+            edgecolors='none',
+        )
+        
+        ax1.set_xlabel("X (m)")
+        ax1.set_ylabel("Y (m)")
+        ax1.set_zlabel("Z (m)")
+        ax1.set_title(f"3D LiDAR Point Cloud – Env {env_id}, Step {self._step_counter}")
+        
+        # Equal aspect ratio
+        max_range = np.ptp(hits_denorm[valid], axis=0).max() / 2.0
+        mid = np.mean(hits_denorm[valid], axis=0)
+        ax1.set_xlim(mid[0] - max_range, mid[0] + max_range)
+        ax1.set_ylim(mid[1] - max_range, mid[1] + max_range)
+        ax1.set_zlim(mid[2] - max_range, mid[2] + max_range)
+        
+        plt.colorbar(scatter, ax=ax1, label='Height (m)', shrink=0.6)
 
-        # Optional equal aspect ratio
-        all_hits = hits.reshape(-1, 3)
-        finite = np.isfinite(all_hits).all(axis=1)
-        if np.sum(finite) > 0:
-            max_range = np.ptp(all_hits[finite], axis=0).max() / 2.0
-            mid = np.mean(all_hits[finite], axis=0)
-            ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
-            ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
-            ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
-
-        if B > 1:
-            ax.legend(loc="upper right", fontsize="x-small")
+        # --- RIGHT: Top-down (X-Y) view ---
+        ax2 = fig.add_subplot(122)
+        
+        scatter2 = ax2.scatter(
+            hits_denorm[valid, 0],
+            hits_denorm[valid, 1],
+            c=hits_denorm[valid, 2],  # color by height
+            cmap='viridis',
+            s=9,
+            edgecolors='black',
+            linewidths=0.3,
+        )
+        
+        # Robot origin marker
+        ax2.scatter(0, 0, s=100, c='red', marker='x', linewidths=2, label='Robot Base', zorder=10)
+        
+        ax2.set_xlabel("X (m)")
+        ax2.set_ylabel("Y (m)")
+        ax2.set_title("Top-Down View (X-Y Plane)")
+        ax2.axis('equal')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc="upper right", fontsize="small")
+        
+        plt.colorbar(scatter2, ax=ax2, label='Height (m)', shrink=0.8)
 
         plt.tight_layout()
         plt.show(block=True)
@@ -660,12 +690,12 @@ class Go2HybridEnv(DirectRLEnv):
     def _visualize_lidar_origin(self, env_id=0):
         """Visualize a small sphere where the RayCaster (LiDAR) is attached."""
         # Retrieve the LiDAR sensor
-        lidar = self._height_scanner
+        lidar = self._lidar_scanner
 
         # Get the LiDAR origin pose in world frame
-        offset_tensor = torch.tensor(self.cfg.height_scanner.offset.pos, device=self.device)
+        offset_tensor = torch.tensor(self.cfg.lidar_scanner.offset.pos, device=self.device)
         lidar_pos_w = lidar.data.pos_w[env_id] + offset_tensor  # [3]
-        #lidar_quat_w = lidar.data.quat_w[env_id] + self.cfg.height_scanner.offset.quat  # [4]
+        #lidar_quat_w = lidar.data.quat_w[env_id] + self.cfg.lidar_scanner.offset.quat  # [4]
 
         # Convert to tensor of shape [1, 3]
         translations = lidar_pos_w.unsqueeze(0)
@@ -744,6 +774,59 @@ class Go2HybridEnv(DirectRLEnv):
             marker_indices=marker_indices.cpu().numpy(),
         )
 
+    def _visualize_step_detection_zone(self, env_id=0, lookahead_distance=0.35):
+        """
+        Visualize the LiDAR detection zone used in thigh_lift_reward.
+        
+        NOTE: The detection zone is defined in the robot's BASE FRAME (not LiDAR frame),
+        because get_bf_hits() returns points transformed to base_link coordinates.
+        
+        Args:
+            env_id: Which environment to visualize (default 0)
+            lookahead_distance: Center of detection window in base frame X (matches reward)
+        """
+        base_pos = self._robot.data.root_pos_w[env_id]
+        base_quat = self._robot.data.root_quat_w[env_id]
 
+        # Detection zone definition (matches thigh_lift_reward exactly)
+        x_min, x_max = lookahead_distance - 0.1, lookahead_distance + 0.1  # ±10cm around center
+        y_min, y_max = -0.2, 0.2  # ±20cm lateral
+        z_height = 0.15  # visualize at 15cm height (mid-step)
 
+        # Box center in base frame
+        box_center_b = torch.tensor(
+            [
+                (x_min + x_max) / 2.0,  # center X
+                0.0,                     # center Y
+                z_height                 # center Z
+            ],
+            dtype=torch.float32,
+            device=self.device
+        )
 
+        # Transform to world frame
+        box_center_w = base_pos + quat_apply(
+            base_quat.unsqueeze(0), 
+            box_center_b.unsqueeze(0)
+        ).squeeze(0)
+
+        # Compute box dimensions
+        box_depth = x_max - x_min   # 0.2m
+        box_width = y_max - y_min   # 0.4m  
+        box_height = 0.3            # 30cm tall (covers typical step height)
+
+        # Visualize using your existing marker
+        translations = box_center_w.unsqueeze(0)  # [1, 3]
+        orientations = base_quat.unsqueeze(0)     # [1, 4]
+        scales = torch.tensor(
+            [[box_depth, box_width, box_height]],
+            dtype=torch.float32,
+            device=self.device
+        )
+
+        self._lookahead_marker.visualize(
+            translations=translations.cpu().numpy(),
+            orientations=orientations.cpu().numpy(),
+            scales=scales.cpu().numpy(),
+            marker_indices=self._lookahead_marker_indices.cpu().numpy(),
+        )
