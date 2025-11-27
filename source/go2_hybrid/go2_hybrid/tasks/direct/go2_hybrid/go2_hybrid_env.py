@@ -104,8 +104,8 @@ class Go2HybridEnv(DirectRLEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        self._height_scanner=RayCaster(self.cfg.height_scanner)
-        self.scene.sensors["height_scanner"]=self._height_scanner
+        self._lidar_scanner=RayCaster(self.cfg.lidar_scanner)
+        self.scene.sensors["lidar_scanner"]=self._lidar_scanner
         self._lidar_buffer= None
         self._lidar_buffer_size = 2
 
@@ -268,6 +268,7 @@ class Go2HybridEnv(DirectRLEnv):
         #     hits_ds = self.get_hits_downsampled(hits_b)
         #     hits = self.get_hits_norm(hits_ds)
         #     print("Current hits:", hits)
+        # print("obs shape:", obs_policy.shape, "state shape:", privileged.shape)
         return {
             "policy": obs_policy,      # for actor network
             "critic": privileged,      # for critic network
@@ -362,7 +363,7 @@ class Go2HybridEnv(DirectRLEnv):
         # initialisation or clearing of lidar buffer for reset envs
         if self._lidar_buffer is None or self._lidar_buffer.shape[0] != self.num_envs:
             # get number of rays by sampling current hits
-            hits0 = self._height_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
+            hits0 = self._lidar_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
             num_rays = hits0.shape[1]
             # buffer shape: (num_envs, buffer_size, num_rays, 3)
             self._lidar_buffer = torch.zeros(
@@ -455,22 +456,31 @@ class Go2HybridEnv(DirectRLEnv):
 
 
     def get_bf_hits(self, env_ids=None):
-        """Return all raw LiDAR hit points in base frame (metres). Also replaces NaNs with max range (70m)."""
+        """Return all LiDAR hits in BASE frame. Also replaces NaNs with max-range."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
 
-        hits_w = self._height_scanner.data.ray_hits_w[env_ids]
-        base_pos_w = self._robot.data.root_pos_w[env_ids]
-        base_quat_w = self._robot.data.root_quat_w[env_ids]
+        # Hits in WORLD frame
+        hits_w = self._lidar_scanner.data.ray_hits_w[env_ids]      # [N, R, 3]
 
-        base_quat_inv = quat_conjugate(base_quat_w)
-        hits_shifted = hits_w - base_pos_w.unsqueeze(1)
-        N, R, _ = hits_shifted.shape
-        base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, R, -1)
-        hits_b = quat_apply(base_quat_exp, hits_shifted)
+        # Base pose in WORLD frame
+        base_pos_w  = self._robot.data.root_pos_w[env_ids]         # [N, 3]
+        base_quat_w = self._robot.data.root_quat_w[env_ids]        # [N, 4]
+        base_quat_inv = quat_conjugate(base_quat_w)                # [N, 4]
 
-        # replace NaNs with max-range value
+        # Shift into base origin
+        hits_shifted = hits_w - base_pos_w.unsqueeze(1)            # [N, R, 3]
+
+        # Correct quaternion expansion
+        base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, hits_shifted.shape[1], -1)
+        # shape = [N, R, 4]
+
+        # Rotate into base frame
+        hits_b = quat_apply(base_quat_exp, hits_shifted)           # [N, R, 3]
+
+        # Replace NaNs
         hits_b = torch.nan_to_num(hits_b, nan=self._lidar_range)
+
         return hits_b
 
 
@@ -557,7 +567,7 @@ class Go2HybridEnv(DirectRLEnv):
             # Retrieve stacked LiDAR buffer (flattened)
             stacked_hits = self.get_stacked_hits(torch.tensor([env_id], device=self.device))  # shape [1, B*R*3]
             B = self._lidar_buffer_size
-            R = self._height_scanner.cfg.pattern_cfg.num_rays
+            R = self._lidar_scanner.cfg.pattern_cfg.num_rays
             hits = stacked_hits.view(B, R, 3).detach().cpu().numpy()  # [B, R, 3]
 
             # Combine or colorize frames
@@ -660,12 +670,12 @@ class Go2HybridEnv(DirectRLEnv):
     def _visualize_lidar_origin(self, env_id=0):
         """Visualize a small sphere where the RayCaster (LiDAR) is attached."""
         # Retrieve the LiDAR sensor
-        lidar = self._height_scanner
+        lidar = self._lidar_scanner
 
         # Get the LiDAR origin pose in world frame
-        offset_tensor = torch.tensor(self.cfg.height_scanner.offset.pos, device=self.device)
+        offset_tensor = torch.tensor(self.cfg.lidar_scanner.offset.pos, device=self.device)
         lidar_pos_w = lidar.data.pos_w[env_id] + offset_tensor  # [3]
-        #lidar_quat_w = lidar.data.quat_w[env_id] + self.cfg.height_scanner.offset.quat  # [4]
+        #lidar_quat_w = lidar.data.quat_w[env_id] + self.cfg.lidar_scanner.offset.quat  # [4]
 
         # Convert to tensor of shape [1, 3]
         translations = lidar_pos_w.unsqueeze(0)
