@@ -48,8 +48,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         prim_path="/World/Terrain",
         #terrain_type="generator",
         #terrain_generator=terrain_gen,
-        terrain_type="plane",
-        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_18_colour.usdz",
+        terrain_type="usd",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_10_colour.usdz",
         
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -118,17 +118,17 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_contact_data_count_per_prim=20,
     )
 
-    height_scanner=RayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/Head_upper",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.1)),
+    lidar_scanner=RayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/Head_lower",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=5,
-            vertical_fov_range= [-50,-10], horizontal_fov_range=[-45,45], horizontal_res=2.0
+            channels=3,
+            vertical_fov_range= [-40,-20], horizontal_fov_range=[-30,30], horizontal_res=10.0
         ),
         mesh_prim_paths=["/World/Terrain"],
         update_period=0.0,
         history_length=0,
-        debug_vis=False,
+        debug_vis=True,
     )
     

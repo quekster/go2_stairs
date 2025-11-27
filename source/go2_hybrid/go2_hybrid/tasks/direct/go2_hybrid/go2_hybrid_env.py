@@ -51,10 +51,15 @@ class Go2HybridEnv(DirectRLEnv):
         dim = gym.spaces.flatdim(self.single_action_space)
         self._actions = torch.zeros(self.num_envs, dim, device=self.device)
         self._previous_actions = torch.zeros(self.num_envs, dim, device=self.device)
+        self._previous_previous_actions = torch.zeros(self.num_envs, dim, device=self.device)
         self._stand_height_ref = torch.zeros(self.num_envs, device=self.device)
 
         # X/Y linear velocity (body frame) + yaw rate commands
         self._commands = torch.zeros(self.num_envs, 4, device=self.device)
+
+        #robot spawn offsets
+        self._base_x_offset = 2.0
+        self._base_z_offset = 0.4
 
         
         self._episode_sums = {
@@ -67,17 +72,18 @@ class Go2HybridEnv(DirectRLEnv):
                 "joint_torque_penalty",
                 "joint_acc_penalty",
                 "action_rate_penalty",
-                "feet_air_time",
+                #"feet_air_time",
                 "undesired_contacts",
-                # "forward_progress",
                 "flat_orientation",
-                "joint_pos_limit",
-                # "energy_penalty",
-                "feet_slide_penalty",
-                "base_height_penalty",
+                # "joint_pos_limit",
+                "energy_penalty",
+                # "feet_slide_penalty",
+                # "base_height_penalty",
                 "foot_clearance_reward",
                 "track_heading_reward",
-                "stand_still_joint_deviation_l1",
+                # "stand_still_joint_deviation_l1",
+                "smoothness_penalty",
+                "base_height_l2_lidar",
             ]
         }
 
@@ -104,8 +110,8 @@ class Go2HybridEnv(DirectRLEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        self._height_scanner=RayCaster(self.cfg.height_scanner)
-        self.scene.sensors["height_scanner"]=self._height_scanner
+        self._lidar_scanner=RayCaster(self.cfg.lidar_scanner)
+        self.scene.sensors["lidar_scanner"]=self._lidar_scanner
         self._lidar_buffer= None
         self._lidar_buffer_size = 2
 
@@ -197,6 +203,7 @@ class Go2HybridEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._previous_actions = self._actions.clone()
+        self._previous_previous_actions = self._previous_actions.clone()
         if actions is not None:
             self._actions = actions.clone()
 
@@ -259,7 +266,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
         # self._visualize_roi_box()
-        #self._visualize_lidar_origin()
+        self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
 
         # if self._step_counter % 50 == 0:  # every 100 steps
@@ -321,6 +328,7 @@ class Go2HybridEnv(DirectRLEnv):
         # clear actions
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        self._previous_previous_actions[env_ids] = 0.0
 
         # # sample new commands in [-1, 1] (same as AnymalC)
         # self._commands[env_ids, 0] = torch.zeros_like(self._commands[env_ids, 0]).uniform_(-1.0, 1.0)  # vx
@@ -338,9 +346,9 @@ class Go2HybridEnv(DirectRLEnv):
         base_origin = self._terrain.env_origins[env_ids].clone()
 
         # move a little backward from the first step (assuming stairs go +X)
-        base_origin[:, 0] -= 2.5
+        base_origin[:, 0] -= self._base_x_offset
         # lift robot slightly so it’s not intersecting the mesh
-        base_origin[:, 2] += 0.4
+        base_origin[:, 2] += self._base_z_offset
 
 
         # Add per-env origin if available (scene may expose env_origins)
@@ -362,7 +370,7 @@ class Go2HybridEnv(DirectRLEnv):
         # initialisation or clearing of lidar buffer for reset envs
         if self._lidar_buffer is None or self._lidar_buffer.shape[0] != self.num_envs:
             # get number of rays by sampling current hits
-            hits0 = self._height_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
+            hits0 = self._lidar_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
             num_rays = hits0.shape[1]
             # buffer shape: (num_envs, buffer_size, num_rays, 3)
             self._lidar_buffer = torch.zeros(
@@ -372,44 +380,6 @@ class Go2HybridEnv(DirectRLEnv):
         else:
             # zero‐out the buffer entries for reset envs
             self._lidar_buffer[env_ids] = 0.0
-
-        ################### Debug snippet to put into your environment class (e.g., in go2_hybrid_env.py)####################
-        # if self._step_counter == 0:
-        #     # 1) Print joint names → indices
-        #     joint_names = self._robot.data.joint_names  # tensor of strings or list
-        #     print("=== Joint index mapping ===")
-        #     for i, name in enumerate(joint_names):
-        #         print(f"joint index {i} -> name {name}")
-
-        #     # 2) Print first few values of observation vector for env_id 0
-        #     obs_full = self._get_observations()["policy"][0].cpu().numpy()
-        #     print("\n=== Observation vector (first 20 entries) ===")
-        #     for i in range(min(20, obs_full.shape[0])):
-        #         print(f"obs index {i} = {obs_full[i]:.4f}")
-
-        #     # 3) Apply known small lateral (y-direction) perturbation
-        #     # Set a command with vy != 0 forcing lateral motion
-        #     self._commands[0, :2] = torch.tensor([0.0, 0.5], device=self.device)  # vx=0, vy=0.5
-        #     self._commands[0, 2:] = torch.tensor([0.0, 0.0], device=self.device)   # yaw_rate=0
-        #     # Step environment for one step (you might call step once)
-        #     # (Assumes external step call; if inside env, step then print)
-        #     print("\n-- After lateral command (vy=0.5) --")
-        #     obs2 = self._get_observations()["policy"][0].cpu().numpy()
-        #     for i in range(min(20, obs2.shape[0])):
-        #         if abs(obs2[i] - obs_full[i]) > 1e-3:
-        #             print(f"obs index {i} changed from {obs_full[i]:.4f} → {obs2[i]:.4f}")
-
-        #     # 4) Apply small yaw rate command
-        #     self._commands[0, :2] = torch.tensor([0.0, 0.0], device=self.device)
-        #     self._commands[0, 2]  = 0.3  # yaw_rate
-        #     print("\n-- After yaw_rate command (yaw_rate=0.3) --")
-        #     obs3 = self._get_observations()["policy"][0].cpu().numpy()
-        #     for i in range(min(20, obs3.shape[0])):
-        #         if abs(obs3[i] - obs2[i]) > 1e-3:
-        #             print(f"obs index {i} changed from {obs2[i]:.4f} → {obs3[i]:.4f}")
-
-        ################################################
-
 
         # --- Immediately sample a new command at episode start ---
         self.resample_commands(env_ids)
@@ -433,45 +403,49 @@ class Go2HybridEnv(DirectRLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
 
-    def resample_commands(self, env_ids: torch.Tensor):
+    def resample_commands(self, env_ids: torch.Tensor):   # only forward for Phase 1
+        """Phase 1: Forward speed + heading towards stairs only."""
         num_envs = len(env_ids)
 
-        # sample random heading
-        heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
+        # Face the stairs (assuming +x is straight towards them)
+        heading = torch.zeros(num_envs, device=self.device)
         self._commands[env_ids, 3] = heading
 
-        # sample linear speed and direction relative to heading
-        speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
-        direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi/6, math.pi/6)  # ±30° cone
-
-        # world-frame velocities aligned with heading
-        vx_world = speed * torch.cos(heading + direction_offset)
-        vy_world = speed * torch.sin(heading + direction_offset)
-        yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
-
-        self._commands[env_ids, 0] = vx_world
-        self._commands[env_ids, 1] = vy_world
-        self._commands[env_ids, 2] = yaw_rate
+        # Forward speed only, modest range
+        speed = torch.empty(num_envs, device=self.device).uniform_(0.1, 0.3)
+        self._commands[env_ids, 0] = speed          # vx
+        self._commands[env_ids, 1] = 0.0            # vy
+        self._commands[env_ids, 2] = 0.0            # yaw rate
 
 
     def get_bf_hits(self, env_ids=None):
-        """Return all raw LiDAR hit points in base frame (metres). Also replaces NaNs with max range (70m)."""
+        """Return all LiDAR hits in BASE frame. Also replaces NaNs with max-range."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
 
-        hits_w = self._height_scanner.data.ray_hits_w[env_ids]
-        base_pos_w = self._robot.data.root_pos_w[env_ids]
-        base_quat_w = self._robot.data.root_quat_w[env_ids]
+        # Hits in WORLD frame
+        hits_w = self._lidar_scanner.data.ray_hits_w[env_ids]      # [N, R, 3]
 
-        base_quat_inv = quat_conjugate(base_quat_w)
-        hits_shifted = hits_w - base_pos_w.unsqueeze(1)
-        N, R, _ = hits_shifted.shape
-        base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, R, -1)
-        hits_b = quat_apply(base_quat_exp, hits_shifted)
+        # Base pose in WORLD frame
+        base_pos_w  = self._robot.data.root_pos_w[env_ids]         # [N, 3]
+        base_quat_w = self._robot.data.root_quat_w[env_ids]        # [N, 4]
+        base_quat_inv = quat_conjugate(base_quat_w)                # [N, 4]
 
-        # replace NaNs with max-range value
+        # Shift into base origin
+        hits_shifted = hits_w - base_pos_w.unsqueeze(1)            # [N, R, 3]
+
+        # Correct quaternion expansion
+        base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, hits_shifted.shape[1], -1)
+        # shape = [N, R, 4]
+
+        # Rotate into base frame
+        hits_b = quat_apply(base_quat_exp, hits_shifted)           # [N, R, 3]
+
+        # Replace NaNs
         hits_b = torch.nan_to_num(hits_b, nan=self._lidar_range)
+
         return hits_b
+
 
 
     def get_hits_downsampled(self, hits_b: torch.Tensor):
@@ -557,7 +531,7 @@ class Go2HybridEnv(DirectRLEnv):
             # Retrieve stacked LiDAR buffer (flattened)
             stacked_hits = self.get_stacked_hits(torch.tensor([env_id], device=self.device))  # shape [1, B*R*3]
             B = self._lidar_buffer_size
-            R = self._height_scanner.cfg.pattern_cfg.num_rays
+            R = self._lidar_scanner.cfg.pattern_cfg.num_rays
             hits = stacked_hits.view(B, R, 3).detach().cpu().numpy()  # [B, R, 3]
 
             # Combine or colorize frames
@@ -660,10 +634,10 @@ class Go2HybridEnv(DirectRLEnv):
     def _visualize_lidar_origin(self, env_id=0):
         """Visualize a small sphere where the RayCaster (LiDAR) is attached."""
         # Retrieve the LiDAR sensor
-        lidar = self._height_scanner
+        lidar = self._lidar_scanner
 
         # Get the LiDAR origin pose in world frame
-        offset_tensor = torch.tensor(self.cfg.height_scanner.offset.pos, device=self.device)
+        offset_tensor = torch.tensor(self.cfg.lidar_scanner.offset.pos, device=self.device)
         lidar_pos_w = lidar.data.pos_w[env_id] + offset_tensor  # [3]
         #lidar_quat_w = lidar.data.quat_w[env_id] + self.cfg.height_scanner.offset.quat  # [4]
 
