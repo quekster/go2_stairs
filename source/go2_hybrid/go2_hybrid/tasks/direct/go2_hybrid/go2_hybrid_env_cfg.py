@@ -41,7 +41,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     # ---------- scene ----------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200, env_spacing=1.0, replicate_physics=True
+        num_envs=200, env_spacing=0.0, replicate_physics=True
     )
 
     terrain = TerrainImporterCfg(
@@ -123,12 +123,12 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=3,
-            vertical_fov_range= [-40,-20], horizontal_fov_range=[-30,30], horizontal_res=10.0
+            channels=5,
+            vertical_fov_range= [-60,-30], horizontal_fov_range=[-30,30], horizontal_res=2.0
         ),
         mesh_prim_paths=["/World/Terrain"],
         update_period=0.0,
         history_length=0,
-        debug_vis=True,
+        debug_vis=False,
     )
     

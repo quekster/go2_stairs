@@ -39,3 +39,23 @@ def out_of_bounds(env, margin: float = 0.5) -> torch.Tensor:
     below_ground = base_pos[:, 2] < (env_origins[:, 2] - 0.1)
 
     return below_ground
+
+def flipped_over(env, threshold: float = 0.0) -> torch.Tensor:
+    """
+    Terminate when the robot is upside-down or significantly flipped.
+    
+    projected_gravity_b[:, 2] meaning:
+        ~ -1.0   → upright
+        ~  0.0   → sideways
+        ~ +1.0   → upside-down or on back
+    
+    So if gravity_z > threshold, the robot is not upright enough.
+    
+    threshold = -0.2 means:
+        -1.0 ... -0.2     → OK (upright-ish)
+        -0.2 ... +1.0     → TERMINATE (flipped/back/side)
+    """
+    g_b = env._robot.data.projected_gravity_b[:, 2]
+    return g_b > threshold
+
+

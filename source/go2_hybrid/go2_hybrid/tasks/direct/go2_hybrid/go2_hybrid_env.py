@@ -23,7 +23,7 @@ import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
 from .rewards import compute_all_rewards
-from .terminations import illegal_contact, out_of_bounds, time_out
+from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over
 
 class Go2HybridEnv(DirectRLEnv):
     
@@ -58,7 +58,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._commands = torch.zeros(self.num_envs, 4, device=self.device)
 
         #robot spawn offsets
-        self._base_x_offset = 2.0
+        self._base_x_offset = 2.5
         self._base_z_offset = 0.4
 
         
@@ -72,18 +72,16 @@ class Go2HybridEnv(DirectRLEnv):
                 "joint_torque_penalty",
                 "joint_acc_penalty",
                 "action_rate_penalty",
-                #"feet_air_time",
                 "undesired_contacts",
                 "flat_orientation",
-                # "joint_pos_limit",
                 "energy_penalty",
-                # "feet_slide_penalty",
-                # "base_height_penalty",
+                "feet_slide_penalty",
                 "foot_clearance_reward",
-                "track_heading_reward",
-                # "stand_still_joint_deviation_l1",
+                "joint_pos_limit",
                 "smoothness_penalty",
                 "base_height_l2_lidar",
+                "foot_vertical_accel_reward",
+                "hind_foot_height_reward",
             ]
         }
 
@@ -94,7 +92,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._feet_ids, _ = self._contact_sensor.find_bodies(['FL_foot','FR_foot', 'RL_foot', 'RR_foot'])
 
         # thighs (undesired contacts): explicit four thighs
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh'])
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower'])
 
 
 
@@ -202,10 +200,13 @@ class Go2HybridEnv(DirectRLEnv):
 
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
+
         self._previous_actions = self._actions.clone()
         self._previous_previous_actions = self._previous_actions.clone()
         if actions is not None:
             self._actions = actions.clone()
+        
 
         # Advance command timer and resample as needed
         self._cmd_timer += self.step_dt
@@ -294,9 +295,10 @@ class Go2HybridEnv(DirectRLEnv):
         time_outs = time_out(self)
         base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
         oob = out_of_bounds(self, margin=0.5)
+        flipped = flipped_over(self, threshold=-0.2)
 
         # --- Combine ---
-        terminated = base_contact | oob
+        terminated = base_contact | oob | flipped
 
         # --- Optional Debug ---
         # if torch.any(terminated):
@@ -342,6 +344,7 @@ class Go2HybridEnv(DirectRLEnv):
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
 
+
         # Robot spawn position from terrain
         base_origin = self._terrain.env_origins[env_ids].clone()
 
@@ -366,6 +369,9 @@ class Go2HybridEnv(DirectRLEnv):
 
         # reference standing height per env (z of default pose + env origin z)
         self._stand_height_ref[env_ids] = (self._robot.data.default_root_state[env_ids][:, 2] + origins[env_ids][:, 2])
+
+        self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
+
 
         # initialisation or clearing of lidar buffer for reset envs
         if self._lidar_buffer is None or self._lidar_buffer.shape[0] != self.num_envs:
@@ -412,7 +418,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._commands[env_ids, 3] = heading
 
         # Forward speed only, modest range
-        speed = torch.empty(num_envs, device=self.device).uniform_(0.1, 0.3)
+        speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
         self._commands[env_ids, 0] = speed          # vx
         self._commands[env_ids, 1] = 0.0            # vy
         self._commands[env_ids, 2] = 0.0            # yaw rate
