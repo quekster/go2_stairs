@@ -58,4 +58,48 @@ def flipped_over(env, threshold: float = 0.0) -> torch.Tensor:
     g_b = env._robot.data.projected_gravity_b[:, 2]
     return g_b > threshold
 
+def stuck(env, vel_thresh: float = 0.03, cmd_thresh: float = 0.2, stuck_time: float = 2.0) -> torch.Tensor:
+    """
+    Terminate when the robot is commanded to move forward but makes no progress
+    for a prolonged period (i.e., stuck on a stair).
+
+    Conditions:
+      - Forward command:          cmd_vx > cmd_thresh
+      - Actual forward velocity:  |vxb| < vel_thresh
+      - Persistence: must remain 'still' for stuck_time seconds.
+
+    Requires env to maintain:
+      env._stuck_counter  (int32 tensor [N])
+
+    Returns:
+      stuck_mask: BoolTensor[N]
+    """
+
+    dt = env.step_dt
+    threshold_steps = int(stuck_time / dt)
+
+    # Base-frame forward velocity
+    vxb = env._robot.data.root_lin_vel_b[:, 0]    # [N]
+
+    # Forward intention
+    cmd_vx = env._commands[:, 0]                  # [N]
+    forward_intent = cmd_vx > cmd_thresh
+
+    # Not moving forward
+    no_motion = torch.abs(vxb) < vel_thresh
+
+    # Stuck if both conditions are true
+    still = forward_intent & no_motion
+
+    # Ensure counter exists
+    if not hasattr(env, "_stuck_counter"):
+        env._stuck_counter = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+
+    # Update counters
+    env._stuck_counter[still] += 1
+    env._stuck_counter[~still] = 0
+
+    # Terminated if we exceed threshold steps
+    stuck_mask = env._stuck_counter >= threshold_steps
+    return stuck_mask
 

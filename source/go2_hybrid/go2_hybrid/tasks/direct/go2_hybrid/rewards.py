@@ -68,11 +68,19 @@ def feet_slide(env) -> torch.Tensor:
     foot_vel_xy = env._robot.data.body_lin_vel_w[:, foot_ids, :2]
     return torch.sum(torch.norm(foot_vel_xy, dim=-1) * contact[:, foot_ids], dim=1)
 
-def base_height_l2_lidar(env, height_safety_margin: float = 0.03, target_height: float = 0.40,) -> torch.Tensor:
-    """Penalize deviation of base height from target using LiDAR-based terrain estimate."""
-    terrain_height_b = get_height_lidar(env, channel=0) + height_safety_margin  # [N]
-    height_error = (-terrain_height_b) - target_height
-    penalty = torch.square(height_error)
+def base_height_l2_lidar(env, height_safety_margin: float = 0.05, target_height: float = 0.30,) -> torch.Tensor:
+    """
+    Penalize deviation of BASE-TO-TERRAIN distance using LiDAR-based terrain estimate.
+    Uses base frame, so base height = 0, terrain height < 0.
+    """
+    # Terrain height under expected forward region (base frame)
+    terrain_height_b = get_height_lidar(env, channel=0) + height_safety_margin   # [N]
+    # Base-to-terrain distance (in base frame)
+    base_to_ground = -terrain_height_b    # positive in meters
+    # Penalize deviation from target height
+    height_error = base_to_ground - target_height
+    penalty = height_error * height_error
+
     return penalty
 
 
@@ -237,7 +245,66 @@ def foot_vertical_accel_reward(env, scale=0.5):
 
     return torch.sum(reward, dim=1) * scale
 
+def backward_vel_penalty(env, vel_thresh: float = 0.02) -> torch.Tensor:
+    """
+    Penalize backward body-frame velocity when commanded to go forward.
 
+    - Looks at root_lin_vel_b[:, 0]  (forward v_x in base frame).
+    - Only applies when commanded forward (cmd_vx > some threshold).
+    """
+    vxb = env._robot.data.root_lin_vel_b[:, 0]    # [N]
+    cmd_vx = env._commands[:, 0]                  # [N]
+
+    # Only when we *intend* to go forward
+    forward_intent = cmd_vx > 0.1
+
+    # Positive penalty for going backward (vxb < 0)
+    backward_amount = torch.clamp(-vxb, min=0.0)  # 0 if vxb >= 0
+
+    penalty = backward_amount * forward_intent
+    return penalty
+
+def feet_air_time_rear(env, threshold: float = 0.5, min_cmd_xy: float = 0.1) -> torch.Tensor:
+    """
+    Encourage regular stepping *only for the rear legs* by rewarding
+    longer swing time upon touchdown.
+    """
+
+    # contact for all 4 feet → slice rear feet [2,3]
+    first_contact = env._contact_sensor.compute_first_contact(env.step_dt)[:, env._feet_ids]
+    first_contact_rear = first_contact[:, 2:]                   # [N, 2]
+
+    # last air time for all 4 feet → slice rear feet
+    last_air = env._contact_sensor.data.last_air_time[:, env._feet_ids]
+    last_air_rear = last_air[:, 2:]                            # [N, 2]
+
+    # reward for rear feet only
+    r = torch.sum((last_air_rear - threshold) * first_contact_rear, dim=1)  # [N]
+
+    # apply only when robot is commanded to move
+    moving = torch.norm(env._commands[:, :2], dim=1) > min_cmd_xy
+
+    return r * moving
+
+def hind_foot_forward_swing(env, vel_scale=0.5, vel_thresh=0.03):
+    """
+    Reward forward (positive X) swing velocity for hind legs.
+    Only rewards when hind legs are in the air (not in stance).
+    """
+
+    # Hind foot velocities in world frame
+    vel_w = env._robot.data.body_lin_vel_w[:, env._feet_ids, :]  # [N,4,3]
+    hind_vel_x = vel_w[:, 2:, 0]                                 # [N,2]
+
+    # Find hind feet that are not in contact
+    forces = env._contact_sensor.data.net_forces_w[:, env._feet_ids]  # [N,4,3]
+    hind_contact = (forces[:, 2:, :].norm(dim=-1) > 5.0)        # [N,2]
+    swing_mask = (~hind_contact).float()
+
+    # Only reward positive forward velocity
+    fwd_vel = torch.clamp(hind_vel_x, min=0.0)
+
+    return (fwd_vel * swing_mask).sum(dim=1) * vel_scale
 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -260,6 +327,9 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "smoothness_penalty": smoothness_penalty(env),
         "base_height_l2_lidar": base_height_l2_lidar(env, target_height=0.33),
         "foot_vertical_accel_reward": foot_vertical_accel_reward(env),
+        "backward_vel_penalty": backward_vel_penalty(env),
+        "feet_air_time_rear": feet_air_time_rear(env),
+        # "hind_foot_forward_swing": hind_foot_forward_swing(env),
 
 
     }
@@ -267,7 +337,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     # --- Scales: tuned for flat-ground learning ---
     w = {
         "track_lin_vel_xy_exp": 5.0,
-        "track_ang_vel_z_exp": 1.0,
+        "track_ang_vel_z_exp": 2.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.05,
         "joint_torque_penalty": -2.0e-5,
@@ -282,8 +352,11 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_pos_limit": -0.2,
         # "stand_still_joint_deviation_l1": -0.01,
         "smoothness_penalty": -0.01,
-        "base_height_l2_lidar": -0.02,
-        "foot_vertical_accel_reward": 0.5,
+        "base_height_l2_lidar": -0.5,
+        "foot_vertical_accel_reward": 1.4,
+        "backward_vel_penalty": -1.0,
+        "feet_air_time_rear": 3.0,
+        # "hind_foot_forward_swing": 0.5,
     }
 
     dt = env.step_dt
