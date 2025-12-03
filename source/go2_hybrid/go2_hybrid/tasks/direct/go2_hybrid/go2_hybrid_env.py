@@ -34,8 +34,26 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._step_counter =0
         self._marker= None
-        self._lidar_buffer = None
+
+        # LiDAR configuration
         self._lidar_range = 70.0  # metres
+        self._lidar_buffer = None
+        self._lidar_buffer_size = 2  # number of temporal frames to stack
+
+        # ---- NEW: control temporal spacing between LiDAR frames ----
+        # Desired time between stored LiDAR frames (in seconds)
+        self._lidar_stack_interval_s = 0.35  # e.g. 0.35 s between frames (t and t+0.35)
+        # Convert to integer steps based on env dt
+        self._lidar_stack_interval_steps = max(
+            1, int(round(self._lidar_stack_interval_s / self.step_dt))
+        )
+        # Per-env counters (how many steps since last buffer update)
+        self._lidar_stack_counters = torch.full(
+            (self.num_envs,),
+            self._lidar_stack_interval_steps,
+            dtype=torch.int32,
+            device=self.device,
+        )
 
         self._ROI_offset =  (0.0, 0.0, 0.0) #from bf
         self._ROI_box_length = 2.0    # metres forward (x direction)
@@ -78,6 +96,7 @@ class Go2HybridEnv(DirectRLEnv):
                 "foot_clearance_reward",
                 "track_heading_reward",
                 "stand_still_joint_deviation_l1",
+                "foot_lateral_separation_penalty",
             ]
         }
 
@@ -368,11 +387,16 @@ class Go2HybridEnv(DirectRLEnv):
             # buffer shape: (num_envs, buffer_size, num_rays, 3)
             self._lidar_buffer = torch.zeros(
                 (self.num_envs, self._lidar_buffer_size, num_rays, 3),
-                dtype=hits0.dtype, device=self.device
+                dtype=hits0.dtype,
+                device=self.device,
             )
         else:
             # zero‐out the buffer entries for reset envs
             self._lidar_buffer[env_ids] = 0.0
+
+        # ---- NEW: reset LiDAR temporal counters for these envs ----
+        # Set to interval so that first call to get_stacked_hits() refreshes immediately
+        self._lidar_stack_counters[env_ids] = self._lidar_stack_interval_steps
 
         ################### Debug snippet to put into your environment class (e.g., in go2_hybrid_env.py)####################
         # if self._step_counter == 0:
