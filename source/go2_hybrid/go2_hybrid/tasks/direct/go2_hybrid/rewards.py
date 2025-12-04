@@ -170,6 +170,61 @@ def stand_still_joint_deviation_l1(env, command_threshold: float = 0.06) -> torc
     cmd_mag = torch.norm(commands[:, :2], dim=1) # magnitude of (vx, vy) command
     return joint_dev * (cmd_mag < command_threshold)
 
+from isaaclab.utils.math import quat_apply, quat_conjugate
+
+from isaaclab.utils.math import quat_apply, quat_conjugate
+
+def foot_lateral_separation_penalty(env,
+                                    min_dist=0.20,
+                                    max_dist=0.30,
+                                    scale=1.0):
+    """
+    Penalize lateral foot spacing when outside a desired range.
+    - No penalty if spacing in [min_dist, max_dist]
+    - Penalty grows quadratically once outside the band.
+    """
+
+    # 1) Foot positions in WORLD frame
+    feet_w = env._robot.data.body_pos_w[:, env._feet_ids, :]    # [N,4,3]
+
+    # 2) Base pose in WORLD frame
+    base_pos_w  = env._robot.data.root_pos_w                    # [N,3]
+    base_quat_w = env._robot.data.root_quat_w                   # [N,4]
+    base_quat_inv = quat_conjugate(base_quat_w)
+
+    # 3) Shift to base origin
+    shifted = feet_w - base_pos_w.unsqueeze(1)
+    base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, 4, -1)
+
+    # 4) Rotate into base frame
+    feet_b = quat_apply(base_quat_exp, shifted)                 # [N,4,3]
+
+    # Foot order: [FL, FR, RL, RR]
+    FL, FR, RL, RR = feet_b[:, 0], feet_b[:, 1], feet_b[:, 2], feet_b[:, 3]
+
+    # 5) L/R spacing = |y_left - y_right|
+    front_lr = torch.abs(FL[:, 1] - FR[:, 1])
+    rear_lr  = torch.abs(RL[:, 1] - RR[:, 1])
+
+    # 6) Penalty only if outside the acceptable spacing range
+    # amount by which spacing is too small
+    too_small_front = torch.clamp(min_dist - front_lr, min=0.0)
+    too_small_rear  = torch.clamp(min_dist - rear_lr,  min=0.0)
+
+    # amount by which spacing is too wide
+    too_big_front = torch.clamp(front_lr - max_dist, min=0.0)
+    too_big_rear  = torch.clamp(rear_lr  - max_dist, min=0.0)
+
+    # Squared error outside the band
+    penalty_front = (too_small_front.pow(2) + too_big_front.pow(2))
+    penalty_rear  = (too_small_rear.pow(2)  + too_big_rear.pow(2))
+
+    # Pure penalty (negative)
+    penalty = -scale * (penalty_front + penalty_rear)
+
+    return penalty
+
+
 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -192,7 +247,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_clearance_reward": foot_clearance_reward(env, target_height=0.10),
         "track_heading_reward": track_heading_reward(env),
         "stand_still_joint_deviation_l1": stand_still_joint_deviation_l1(env),
-
+        "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
     }
 
     # --- Scales: tuned for flat-ground learning ---
@@ -215,7 +270,10 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "track_heading_reward": 0.1,
         "joint_pos_limit": -0.4,
         "stand_still_joint_deviation_l1": -0.4,
+        "foot_lateral_separation_penalty": -0.05,
     }
+
+    
 
     dt = env.step_dt
     scaled: Dict[str, torch.Tensor] = {}
