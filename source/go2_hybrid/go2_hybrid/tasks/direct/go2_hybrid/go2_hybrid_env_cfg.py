@@ -19,8 +19,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     episode_length_s = 20.0
     decimation = 4
     action_space = 12          # Unitree Go2 typically 12 actuated joints
-    observation_space = 949    # will be validated at runtime 
-    state_space = 1044
+    observation_space = 799    # will be validated at runtime 
+    state_space = 1011
     dt=0.005
 
     action_scale = 0.25
@@ -124,7 +124,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
             channels=5,
-            vertical_fov_range= [-60,-30], horizontal_fov_range=[-30,30], horizontal_res=2.0
+            vertical_fov_range= [-60,-10], horizontal_fov_range=[-50,50], horizontal_res=2.0
         ),
         mesh_prim_paths=["/World/Terrain"],
         update_period=0.0,
@@ -132,3 +132,11 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
     
+    height_scanner=RayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.2)),
+        ray_alignment="base",
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.2,0.8]),    
+        mesh_prim_paths=["/World/Terrain"],
+        debug_vis=False,
+    )    

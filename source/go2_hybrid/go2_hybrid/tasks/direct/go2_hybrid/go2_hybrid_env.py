@@ -38,7 +38,7 @@ class Go2HybridEnv(DirectRLEnv):
         # LiDAR configuration
         self._lidar_range = 70.0  # metres
         self._lidar_buffer = None
-        self._lidar_buffer_size = 2  # number of temporal frames to stack
+        self._lidar_buffer_size = 1  # number of temporal frames to stack
 
         # ---- NEW: control temporal spacing between LiDAR frames ----
         # Desired time between stored LiDAR frames (in seconds)
@@ -123,10 +123,11 @@ class Go2HybridEnv(DirectRLEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
+        self._height_scanner=RayCaster(self.cfg.height_scanner)
+        self.scene.sensors["height_scanner"]=self._height_scanner        
+
         self._lidar_scanner=RayCaster(self.cfg.lidar_scanner)
         self.scene.sensors["lidar_scanner"]=self._lidar_scanner
-        self._lidar_buffer= None
-        self._lidar_buffer_size = 2
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -238,8 +239,9 @@ class Go2HybridEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
+        height_obs = (self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5).clip(-1.0, 1.0) # -0.5 is an empirical centering offset introduced so that the height-observation distribution is centered around 0 for flat terrain
+        lidar_obs = self.get_single_lidar_obs()
         # Actor observations (realistic)
-        lidar_obs = self.get_stacked_hits()
         obs_policy = torch.cat(
             [
                 self._robot.data.root_lin_vel_b,                  # (N,3) → vx, vy, vz
@@ -263,6 +265,7 @@ class Go2HybridEnv(DirectRLEnv):
                 self._robot.data.applied_torque,        # (N, ndof)
                 self._contact_sensor.data.net_forces_w.reshape(self.num_envs, -1), # contacts
                 self._contact_sensor.data.last_air_time.reshape(self.num_envs, -1),
+                height_obs,                             # (N, 1)
             ],
             dim=-1,
         )
@@ -270,24 +273,20 @@ class Go2HybridEnv(DirectRLEnv):
 
         #-----DEBUGGER for hits (base/world)--------#
 
-        #hits_b = self.get_bf_hits_normalised()
-        #print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
-        #print("Current base frame hits:", hits_b[0])
-        # print(f"[DEBUG] Frame_t-2 hits: {lidar_obs[0].cpu().numpy()}")
-        # print("------------------NEXT STEP------------------")
-
-        #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
         # self._visualize_roi_box()
         #self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
 
         # if self._step_counter % 50 == 0:  # every 100 steps
-        #     #self.plot_lidar_3d(env_id=0, show_history=False)
         #     hits_b = self.get_bf_hits(torch.tensor([0], device=self.device))[0]
-        #     hits_ds = self.get_hits_downsampled(hits_b)
-        #     hits = self.get_hits_norm(hits_ds)
-        #     print("Current hits:", hits)
-        # print("obs shape:", obs_policy.shape, "state shape:", privileged.shape)
+        #     print("Current LiDAR base-frame hits:", hits_b)
+        #     print("Flattened LiDAR obs shape:", self.get_single_lidar_obs().shape)
+            
+        #     height_hits_raw = (self._height_scanner.data.pos_w[0, 2]- self._height_scanner.data.ray_hits_w[0, :, 2]).clip(-1.0, 1.0)  
+        #     print("Current height_obs (env0):", height_hits_raw)
+        #     print("Height_obs shape:", height_obs.shape)
+            # print("obs shape:", obs_policy.shape, "state shape:", privileged.shape)
+
         return {
             "policy": obs_policy,      # for actor network
             "critic": privileged,      # for critic network
@@ -508,34 +507,34 @@ class Go2HybridEnv(DirectRLEnv):
         return hits_b
 
 
-    def get_hits_downsampled(self, hits_b: torch.Tensor):
-        """
-        Downsample LiDAR points by retaining only those within a box region in front of the robot.
-        - Points outside the ROI are discarded (not zeroed).
-        - NaN points (no hit) are replaced with max lidar range.
-        """
-        # --- Replace NaNs with max range first ---
-        hits_b = torch.nan_to_num(hits_b, nan=self._lidar_range)
+    # def get_hits_downsampled(self, hits_b: torch.Tensor):
+    #     """
+    #     Downsample LiDAR points by retaining only those within a box region in front of the robot.
+    #     - Points outside the ROI are discarded (not zeroed).
+    #     - NaN points (no hit) are replaced with max lidar range.
+    #     """
+    #     # --- Replace NaNs with max range first ---
+    #     hits_b = torch.nan_to_num(hits_b, nan=self._lidar_range)
 
-        # --- Define ROI bounds (in base frame) ---
-        x_off, y_off, z_off = self._ROI_offset
-        x_min, x_max = x_off, x_off + self._ROI_box_length
-        y_min, y_max = -self._ROI_box_width / 2 + y_off, self._ROI_box_width / 2 + y_off
-        # We’re ignoring z-axis limits intentionally for your use case
+    #     # --- Define ROI bounds (in base frame) ---
+    #     x_off, y_off, z_off = self._ROI_offset
+    #     x_min, x_max = x_off, x_off + self._ROI_box_length
+    #     y_min, y_max = -self._ROI_box_width / 2 + y_off, self._ROI_box_width / 2 + y_off
+    #     # We’re ignoring z-axis limits intentionally for your use case
 
-        # --- Create mask for points inside ROI ---
-        mask = (
-            (hits_b[..., 0] >= x_min)
-            & (hits_b[..., 0] <= x_max)
-            & (hits_b[..., 1] >= y_min)
-            & (hits_b[..., 1] <= y_max)
-        )
+    #     # --- Create mask for points inside ROI ---
+    #     mask = (
+    #         (hits_b[..., 0] >= x_min)
+    #         & (hits_b[..., 0] <= x_max)
+    #         & (hits_b[..., 1] >= y_min)
+    #         & (hits_b[..., 1] <= y_max)
+    #     )
 
-        # Replace outside-ROI points with max lidar range
-        hits_filtered = hits_b.clone()
-        hits_filtered[~mask] = self._lidar_range
+    #     # Replace outside-ROI points with max lidar range
+    #     hits_filtered = hits_b.clone()
+    #     hits_filtered[~mask] = self._lidar_range
 
-        return hits_filtered  
+    #     return hits_filtered  
 
 
     def get_hits_norm(self, hits_ds: torch.Tensor):
@@ -569,6 +568,28 @@ class Go2HybridEnv(DirectRLEnv):
         R = current_hits_b.shape[1]
         stacked = buff[env_ids].reshape(N, B * R * 3)
         return stacked     
+    
+    def get_single_lidar_obs(self, env_ids=None):
+        """
+        Return current frame LiDAR hits:
+        - base frame
+        - normalized to [0, 1]
+        - flattened (N, R*3)
+        """
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+
+        # 1. Convert world → base frame
+        hits_b = self.get_bf_hits(env_ids)             # [N, R, 3]
+
+        # 2. Normalize (divide by max lidar range)
+        hits_norm = self.get_hits_norm(hits_b)         # [N, R, 3]
+
+        # 3. Flatten because policy expects (N, ?)
+        hits_flat = hits_norm.reshape(self.num_envs, -1)
+
+        return hits_flat
 
     def plot_lidar_3d(self, env_id=0, frame="world", show_history=True):
         """

@@ -127,41 +127,70 @@ def energy_penalty(env):
 
 #     return active_mask * penalty
 
-def base_height_penalty(env, std: float = 0.05) -> torch.Tensor:
-    """
-    Penalize deviation of the robot's base height from its nominal standing height.
+# def base_height_penalty(env, std: float = 0.05) -> torch.Tensor:
+#     """
+#     Penalize deviation of the robot's base height from its nominal standing height.
 
-    This is the IsaacLab equivalent of 'reward_base_height' from legged-gym,
-    but written as a *penalty* (larger when too low or too high).
+#     This is the IsaacLab equivalent of 'reward_base_height' from legged-gym,
+#     but written as a *penalty* (larger when too low or too high).
 
-    Args:
-        env:  Go2HybridEnv (DirectRLEnv subclass).
-        std:  scaling factor controlling how sharply deviations are penalized.
-    Returns:
-        torch.Tensor: per-env penalty values (positive = bad).
+#     Args:
+#         env:  Go2HybridEnv (DirectRLEnv subclass).
+#         std:  scaling factor controlling how sharply deviations are penalized.
+#     Returns:
+#         torch.Tensor: per-env penalty values (positive = bad).
+#     """
+#     # Base COM height in world frame
+#     base_z = env._robot.data.root_pos_w[:, 2]
+
+#     # Reference standing height (set during env.reset())
+#     target_z = 0.3
+
+#     # Squared deviation
+#     err_sq = torch.square(base_z - target_z)
+
+#     # Optional Gaussian shaping (makes near-target small penalty, large far away)
+#     # penalty = 1.0 - torch.exp(-err_sq / (2 * std**2))
+
+#     return err_sq
+
+def base_height_penalty(env, target: float = 0.30, std: float = 0.05) -> torch.Tensor:
     """
-    # Base COM height in world frame
+    Penalize deviation of the robot's base height from a terrain-relative target height.
+
+    To maintain a stable target above whatever terrain the height_scanner detects.
+    """
     base_z = env._robot.data.root_pos_w[:, 2]
-
-    # Reference standing height (set during env.reset())
-    target_z = 0.3
-
-    # Squared deviation
-    err_sq = torch.square(base_z - target_z)
-
-    # Optional Gaussian shaping (makes near-target small penalty, large far away)
-    # penalty = 1.0 - torch.exp(-err_sq / (2 * std**2))
-
+    height_hits_z = env._height_scanner.data.ray_hits_w[..., 2]
+    terrain_z = torch.mean(torch.nan_to_num(height_hits_z,nan=2.0, posinf=2.0, neginf=-2.0), dim=1)
+    adjusted_target_z = terrain_z + target
+    err_sq = torch.square(base_z - adjusted_target_z)
     return err_sq
 
-def foot_clearance_reward(env, target_height: float = 0.10, std: float = 0.05, tanh_mult: float = 2.0) -> torch.Tensor:
-    "Reward swinging feet for clearing specified height."
+# def foot_clearance_reward(env, target_height: float = 0.10, std: float = 0.05, tanh_mult: float = 2.0) -> torch.Tensor:
+#     "Reward swinging feet for clearing specified height."
+#     foot_z = env._robot.data.body_pos_w[:, env._feet_ids, 2]
+#     foot_z_error = torch.square(foot_z - target_height)    
+#     foot_vel_xy = torch.norm(env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2)
+#     foot_vel_tanh = torch.tanh(tanh_mult*foot_vel_xy) #tanh function scales smoothly between 0 and 1
+#     reward = foot_z_error*foot_vel_tanh
+#     return torch.exp(-torch.sum(reward, dim=1) / (2 * std**2))
+
+def foot_clearance_reward(env, desired_clearance: float = 0.10, safety_margin: float = 0.05, std: float = 0.05) -> torch.Tensor:
+    terrain_hits = env._height_scanner.data.ray_hits_w[..., 2] + safety_margin  # (N, R)
+    terrain_height = torch.mean(torch.nan_to_num(terrain_hits, nan=2.0), dim=1) # (N,)
     foot_z = env._robot.data.body_pos_w[:, env._feet_ids, 2]
-    foot_z_error = torch.square(foot_z - target_height)    
-    foot_vel_xy = torch.norm(env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2)
-    foot_vel_tanh = torch.tanh(tanh_mult*foot_vel_xy) #tanh function scales smoothly between 0 and 1
-    reward = foot_z_error*foot_vel_tanh
-    return torch.exp(-torch.sum(reward, dim=1) / (2 * std**2))
+    clearance = foot_z - terrain_height.unsqueeze(1)
+    clearance_penalty = torch.square(desired_clearance - clearance)
+    foot_vel_xy = torch.norm(env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2)   # [N, 4]
+    swing_weight = torch.tanh(2.0 * foot_vel_xy)
+    weight_penalty = clearance_penalty * swing_weight
+    total_error= torch.sum(weight_penalty, dim=1)
+    reward = torch.exp(-total_error / (2 * std **2))
+
+    return reward
+
+
 
 def stand_still_joint_deviation_l1(env, command_threshold: float = 0.06) -> torch.Tensor:
     """Penalize offsets from the default joint positions when the command is very small."""
@@ -244,7 +273,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         # "energy_penalty": energy_penalty(env),
         "feet_slide_penalty": feet_slide(env),
         "base_height_penalty": base_height_penalty(env),
-        "foot_clearance_reward": foot_clearance_reward(env, target_height=0.10),
+        "foot_clearance_reward": foot_clearance_reward(env),
         "track_heading_reward": track_heading_reward(env),
         "stand_still_joint_deviation_l1": stand_still_joint_deviation_l1(env),
         "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
@@ -252,23 +281,23 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        "track_lin_vel_xy_exp": 2.0,
+        "track_lin_vel_xy_exp": 3.0, #increased from 2.0
         "track_ang_vel_z_exp": 0.7,
         # "forward_progress": 0.5,
         "ang_vel_xy_penalty": -0.05,
         "joint_torque_penalty": -2.0e-5,
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.5,
-        "feet_air_time": 0.4,
+        "feet_air_time": 0.6, #increased from 0.4
         "undesired_contacts": -1.0,
         "flat_orientation": -4.0,
         "lin_vel_z_penalty": -2.0,
         # "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.1,
-        "base_height_penalty": -6.5,
+        "base_height_penalty": -6.5, #increased from -6.5
         "foot_clearance_reward": 0.5,
         "track_heading_reward": 0.1,
-        "joint_pos_limit": -0.4,
+        "joint_pos_limit": -0.5,
         "stand_still_joint_deviation_l1": -0.4,
         "foot_lateral_separation_penalty": -0.05,
     }
