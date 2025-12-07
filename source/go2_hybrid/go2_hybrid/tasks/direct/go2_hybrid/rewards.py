@@ -94,66 +94,6 @@ def energy_penalty(env):
     joint_vel = env._robot.data.joint_vel
     return torch.sum(torch.abs(torque * joint_vel), dim=1)
 
-# def body_height_penalty(env, std: float = 0.05, stair_threshold: float = 0.15) -> torch.Tensor:
-#     """
-#     Penalize deviation of base height from nominal standing height,
-#     but automatically disable the penalty when climbing stairs
-#     (i.e., if any foot is significantly elevated above ground level).
-#     """
-
-#     # Base COM height
-#     base_z = env._robot.data.root_pos_w[:, 2]
-#     target_z = 0.3
-
-#     # Raw height deviation
-#     err_sq = torch.square(base_z - target_z)
-
-#     # --- STAIR-AWARE ACTIVE MASK ---
-#     # 1. Foot positions in world frame
-#     foot_z = env._robot.data.body_pos_w[:, env._feet_ids, 2]  # [N, 4]
-#     # 2. Ground level under robot (approximate as min foot height)
-#     ground_z = torch.min(foot_z, dim=1).values                 # [N]
-#     # 3. Detect stair condition: any foot higher than ground_z + threshold
-#     stair_condition = (foot_z - ground_z.unsqueeze(1) > stair_threshold).any(dim=1).float()
-#     # 4. Detect stance: at least one foot in contact
-#     contact_forces = env._contact_sensor.data.net_forces_w[:, env._feet_ids, :]
-#     contact_mag = torch.norm(contact_forces, dim=-1)
-#     contact_any = (contact_mag > 1.0).any(dim=1).float()
-#     # 5. Disable penalty if climbing (stair_condition = 1)
-#     active_mask = contact_any * (1.0 - stair_condition)
-
-#     # Gaussian-shaped penalty
-#     penalty = 1.0 - torch.exp(-err_sq / (2 * std**2))
-
-#     return active_mask * penalty
-
-# def base_height_penalty(env, std: float = 0.05) -> torch.Tensor:
-#     """
-#     Penalize deviation of the robot's base height from its nominal standing height.
-
-#     This is the IsaacLab equivalent of 'reward_base_height' from legged-gym,
-#     but written as a *penalty* (larger when too low or too high).
-
-#     Args:
-#         env:  Go2HybridEnv (DirectRLEnv subclass).
-#         std:  scaling factor controlling how sharply deviations are penalized.
-#     Returns:
-#         torch.Tensor: per-env penalty values (positive = bad).
-#     """
-#     # Base COM height in world frame
-#     base_z = env._robot.data.root_pos_w[:, 2]
-
-#     # Reference standing height (set during env.reset())
-#     target_z = 0.3
-
-#     # Squared deviation
-#     err_sq = torch.square(base_z - target_z)
-
-#     # Optional Gaussian shaping (makes near-target small penalty, large far away)
-#     # penalty = 1.0 - torch.exp(-err_sq / (2 * std**2))
-
-#     return err_sq
-
 def base_height_penalty(env, target: float = 0.30, std: float = 0.05) -> torch.Tensor:
     """
     Penalize deviation of the robot's base height from a terrain-relative target height.
@@ -167,16 +107,8 @@ def base_height_penalty(env, target: float = 0.30, std: float = 0.05) -> torch.T
     err_sq = torch.square(base_z - adjusted_target_z)
     return err_sq
 
-# def foot_clearance_reward(env, target_height: float = 0.10, std: float = 0.05, tanh_mult: float = 2.0) -> torch.Tensor:
-#     "Reward swinging feet for clearing specified height."
-#     foot_z = env._robot.data.body_pos_w[:, env._feet_ids, 2]
-#     foot_z_error = torch.square(foot_z - target_height)    
-#     foot_vel_xy = torch.norm(env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2)
-#     foot_vel_tanh = torch.tanh(tanh_mult*foot_vel_xy) #tanh function scales smoothly between 0 and 1
-#     reward = foot_z_error*foot_vel_tanh
-#     return torch.exp(-torch.sum(reward, dim=1) / (2 * std**2))
 
-def foot_clearance_reward(env, desired_clearance: float = 0.10, safety_margin: float = 0.05, std: float = 0.05) -> torch.Tensor:
+def foot_clearance_reward(env, desired_clearance: float = 0.20, safety_margin: float = 0.05, std: float = 0.05, thigh_gain: float = 1.5) -> torch.Tensor:
     terrain_hits = env._height_scanner.data.ray_hits_w[..., 2] + safety_margin  # (N, R)
     terrain_height = torch.mean(torch.nan_to_num(terrain_hits, nan=2.0), dim=1) # (N,)
     foot_z = env._robot.data.body_pos_w[:, env._feet_ids, 2]
@@ -184,7 +116,17 @@ def foot_clearance_reward(env, desired_clearance: float = 0.10, safety_margin: f
     clearance_penalty = torch.square(desired_clearance - clearance)
     foot_vel_xy = torch.norm(env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2)   # [N, 4]
     swing_weight = torch.tanh(2.0 * foot_vel_xy)
-    weight_penalty = clearance_penalty * swing_weight
+
+    #trying something with thigh
+    thigh_pos = env._robot.data.joint_pos[:, 4:8]         # (N,4)
+    # Only positive rotation counts as upward lift
+    thigh_lift = torch.relu(thigh_pos)                    # (N,4)
+    thigh_weight = torch.tanh(thigh_gain * thigh_lift)
+    combined_weight = swing_weight * (0.2 + 0.8 * thigh_weight)
+    weight_penalty = clearance_penalty * combined_weight
+    #----------
+
+    # weight_penalty = clearance_penalty * swing_weight
     total_error= torch.sum(weight_penalty, dim=1)
     reward = torch.exp(-total_error / (2 * std **2))
 
@@ -204,7 +146,7 @@ from isaaclab.utils.math import quat_apply, quat_conjugate
 from isaaclab.utils.math import quat_apply, quat_conjugate
 
 def foot_lateral_separation_penalty(env,
-                                    min_dist=0.20,
+                                    min_dist=0.29,
                                     max_dist=0.30,
                                     scale=1.0):
     """
@@ -290,11 +232,11 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "action_rate_penalty": -0.5,
         "feet_air_time": 0.6, #increased from 0.4
         "undesired_contacts": -1.0,
-        "flat_orientation": -4.0,
+        "flat_orientation": -1.0, #decreased from -4.0
         "lin_vel_z_penalty": -2.0,
         # "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.1,
-        "base_height_penalty": -6.5, #increased from -6.5
+        "base_height_penalty": -4.0, #increased from -6.5
         "foot_clearance_reward": 0.5,
         "track_heading_reward": 0.1,
         "joint_pos_limit": -0.5,
