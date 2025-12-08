@@ -34,27 +34,8 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._step_counter =0
         self._marker= None
-
-
-        # LiDAR configuration
-        self._lidar_range = 70.0  # metres
         self._lidar_buffer = None
-        self._lidar_buffer_size = 2  # number of temporal frames to stack
-
-        # ---- NEW: control temporal spacing between LiDAR frames ----
-        # Desired time between stored LiDAR frames (in seconds)
-        self._lidar_stack_interval_s = 0.35  # e.g. 0.35 s between frames (t and t+0.35)
-        # Convert to integer steps based on env dt
-        self._lidar_stack_interval_steps = max(
-            1, int(round(self._lidar_stack_interval_s / self.step_dt))
-        )
-        # Per-env counters (how many steps since last buffer update)
-        self._lidar_stack_counters = torch.full(
-            (self.num_envs,),
-            self._lidar_stack_interval_steps,
-            dtype=torch.int32,
-            device=self.device,
-        )
+        self._lidar_range = 70.0  # metres
 
         self._ROI_offset =  (0.0, 0.0, 0.0) #from bf
         self._ROI_box_length = 2.0    # metres forward (x direction)
@@ -104,7 +85,6 @@ class Go2HybridEnv(DirectRLEnv):
                 "foot_vertical_accel_reward",
                 "backward_vel_penalty",
                 "feet_air_time_rear",
-                # "hind_foot_forward_swing",
             ]
         }
 
@@ -361,7 +341,7 @@ class Go2HybridEnv(DirectRLEnv):
         # self._commands[env_ids, 1] = torch.zeros_like(self._commands[env_ids, 1]).uniform_(-1.0, 1.0)  # vy
         # self._commands[env_ids, 2] = torch.zeros_like(self._commands[env_ids, 2]).uniform_(-1.0, 1.0)  # yaw rate
         # self._commands[env_ids, 3] = torch.zeros_like(self._commands[env_ids, 3]).uniform_(-math.pi, math.pi)  # heading
-        
+
         # reset stuck counters
         self._stuck_counter[env_ids] = 0
 
@@ -407,16 +387,11 @@ class Go2HybridEnv(DirectRLEnv):
             # buffer shape: (num_envs, buffer_size, num_rays, 3)
             self._lidar_buffer = torch.zeros(
                 (self.num_envs, self._lidar_buffer_size, num_rays, 3),
-                dtype=hits0.dtype,
-                device=self.device,
+                dtype=hits0.dtype, device=self.device
             )
         else:
             # zero‐out the buffer entries for reset envs
             self._lidar_buffer[env_ids] = 0.0
-
-        # ---- NEW: reset LiDAR temporal counters for these envs ----
-        # Set to interval so that first call to get_stacked_hits() refreshes immediately
-        self._lidar_stack_counters[env_ids] = self._lidar_stack_interval_steps
 
         # --- Immediately sample a new command at episode start ---
         self.resample_commands(env_ids)
@@ -526,46 +501,26 @@ class Go2HybridEnv(DirectRLEnv):
     
 
     def get_stacked_hits(self, env_ids=None):
-        """Temporal stack of normalized LiDAR hits with controllable time spacing."""
+        """Temporal stack of normalized, downsampled LiDAR hits."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
 
-        # --- Current normalized LiDAR hits in base frame ---
-        hits_b = self.get_bf_hits(env_ids)          # [N, R, 3]
-        current_hits_b = self.get_hits_norm(hits_b) # [N, R, 3], normalized by lidar_range
+        # --- Proper call sequence ---
+        hits_b = self.get_bf_hits(env_ids)
+        # hits_ds = self.get_hits_downsampled(hits_b)
+        # current_hits_b = self.get_hits_norm(hits_ds)
+        current_hits_b = self.get_hits_norm(hits_b)
 
-        buff = self._lidar_buffer                   # [num_envs, B, R, 3]
-        counters = self._lidar_stack_counters       # [num_envs]
-        interval = self._lidar_stack_interval_steps
+        # --- Buffer stacking ---
+        buff = self._lidar_buffer  # shape: [num_envs, buffer_size, R, 3]
+        buff[env_ids, :-1, :, :] = buff[env_ids, 1:, :, :]
+        buff[env_ids, -1, :, :] = current_hits_b
 
-        # ---- Update temporal counters for these envs ----
-        counters[env_ids] += 1
-        # Which envs are due for a buffer update?
-        update_mask = counters[env_ids] >= interval
-
-        if torch.any(update_mask):
-            # env indices in the global buffer that need updating
-            envs_to_update = env_ids[update_mask]
-
-            # Shift older frames towards the front and insert the new frame at the end
-            # buff[env, 0] = oldest, buff[env, -1] = newest
-            buff[envs_to_update, :-1, :, :] = buff[envs_to_update, 1:, :, :]
-            buff[envs_to_update, -1, :, :] = current_hits_b[update_mask]
-
-            # Reset counters for those envs
-            counters[envs_to_update] = 0
-
-        # For envs that did not update this step, buff still contains older frames,
-        # so the temporal spacing between frames is ~ interval * step_dt.
-
-        # ---- Flatten stacked history for the requested envs ----
-        N = env_ids.shape[0]
+        N = current_hits_b.shape[0]
         B = self._lidar_buffer_size
-        R = self._lidar_buffer.shape[2]
+        R = current_hits_b.shape[1]
         stacked = buff[env_ids].reshape(N, B * R * 3)
-
-        return stacked
-     
+        return stacked     
 
     def plot_lidar_3d(self, env_id=0, frame="world", show_history=True):
         """
@@ -774,7 +729,6 @@ class Go2HybridEnv(DirectRLEnv):
             scales=scales.cpu().numpy(),
             marker_indices=marker_indices.cpu().numpy(),
         )
-
 
 
 

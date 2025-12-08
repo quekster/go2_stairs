@@ -286,25 +286,7 @@ def feet_air_time_rear(env, threshold: float = 0.5, min_cmd_xy: float = 0.1) -> 
 
     return r * moving
 
-def hind_foot_forward_swing(env, vel_scale=0.5, vel_thresh=0.03):
-    """
-    Reward forward (positive X) swing velocity for hind legs.
-    Only rewards when hind legs are in the air (not in stance).
-    """
 
-    # Hind foot velocities in world frame
-    vel_w = env._robot.data.body_lin_vel_w[:, env._feet_ids, :]  # [N,4,3]
-    hind_vel_x = vel_w[:, 2:, 0]                                 # [N,2]
-
-    # Find hind feet that are not in contact
-    forces = env._contact_sensor.data.net_forces_w[:, env._feet_ids]  # [N,4,3]
-    hind_contact = (forces[:, 2:, :].norm(dim=-1) > 5.0)        # [N,2]
-    swing_mask = (~hind_contact).float()
-
-    # Only reward positive forward velocity
-    fwd_vel = torch.clamp(hind_vel_x, min=0.0)
-
-    return (fwd_vel * swing_mask).sum(dim=1) * vel_scale
 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -329,7 +311,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_vertical_accel_reward": foot_vertical_accel_reward(env),
         "backward_vel_penalty": backward_vel_penalty(env),
         "feet_air_time_rear": feet_air_time_rear(env),
-        # "hind_foot_forward_swing": hind_foot_forward_swing(env),
 
 
     }
@@ -356,7 +337,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_vertical_accel_reward": 1.4,
         "backward_vel_penalty": -1.0,
         "feet_air_time_rear": 3.0,
-        # "hind_foot_forward_swing": 0.5,
     }
 
     dt = env.step_dt
