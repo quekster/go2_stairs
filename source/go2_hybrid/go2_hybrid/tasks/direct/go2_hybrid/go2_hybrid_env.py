@@ -67,7 +67,8 @@ class Go2HybridEnv(DirectRLEnv):
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "track_lin_vel_xy_exp",
+                # "track_lin_vel_xy_exp",
+                "track_modified_vel_reward",
                 "track_ang_vel_z_exp",
                 "lin_vel_z_penalty",
                 "ang_vel_xy_penalty",
@@ -95,7 +96,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._feet_ids, _ = self._contact_sensor.find_bodies(['FL_foot','FR_foot', 'RL_foot', 'RR_foot'])
 
         # thighs (undesired contacts): explicit four thighs
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower'])
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower', 'FL_calf','FR_calf', 'RL_calf', 'RR_calf'])
 
 
 
@@ -110,6 +111,9 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+
+        self._height_scanner=RayCaster(self.cfg.height_scanner)
+        self.scene.sensors["height_scanner"]=self._height_scanner 
 
         self._lidar_scanner=RayCaster(self.cfg.lidar_scanner)
         self.scene.sensors["lidar_scanner"]=self._lidar_scanner
@@ -231,7 +235,9 @@ class Go2HybridEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         # Actor observations (realistic)
-        lidar_obs = self.get_stacked_hits()
+        # lidar_obs = self.get_stacked_hits()
+        height_obs = (self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5).clip(-1.0, 1.0) # -0.5 is an empirical centering offset introduced so that the height-observation distribution is centered around 0 for flat terrain
+        lidar_obs = self.get_single_lidar_obs()
         obs_policy = torch.cat(
             [
                 self._robot.data.root_lin_vel_b,                  # (N,3) → vx, vy, vz
@@ -255,6 +261,7 @@ class Go2HybridEnv(DirectRLEnv):
                 self._robot.data.applied_torque,        # (N, ndof)
                 self._contact_sensor.data.net_forces_w.reshape(self.num_envs, -1), # contacts
                 self._contact_sensor.data.last_air_time.reshape(self.num_envs, -1),
+                height_obs,                             # (N, num_rays)
             ],
             dim=-1,
         )
@@ -521,6 +528,28 @@ class Go2HybridEnv(DirectRLEnv):
         R = current_hits_b.shape[1]
         stacked = buff[env_ids].reshape(N, B * R * 3)
         return stacked     
+    
+    def get_single_lidar_obs(self, env_ids=None):
+        """
+        Return current frame LiDAR hits:
+        - base frame
+        - normalized to [0, 1]
+        - flattened (N, R*3)
+        """
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+
+        # 1. Convert world → base frame
+        hits_b = self.get_bf_hits(env_ids)             # [N, R, 3]
+
+        # 2. Normalize (divide by max lidar range)
+        hits_norm = self.get_hits_norm(hits_b)         # [N, R, 3]
+
+        # 3. Flatten because policy expects (N, ?)
+        hits_flat = hits_norm.reshape(self.num_envs, -1)
+
+        return hits_flat      
 
     def plot_lidar_3d(self, env_id=0, frame="world", show_history=True):
         """

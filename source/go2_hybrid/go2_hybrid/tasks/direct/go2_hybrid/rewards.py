@@ -18,6 +18,64 @@ def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
     lin_vel_error = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     return torch.exp(-lin_vel_error / std2)
 
+def track_modified_vel_reward(env, base_std2=0.25, pitch_thresh=0.15):
+    """
+    Blends base-frame velocity tracking with world-frame forward progression,
+    depending on pitch angle. Smooth transition avoids reward conflict.
+    """
+
+    # --- base-frame tracking ---
+    vel_b = env._robot.data.root_lin_vel_b[:, :2]
+    cmd   = env._commands[:, :2]
+    base_error = torch.sum((cmd - vel_b)**2, dim=1)
+    track_base = torch.exp(-base_error / base_std2)
+
+    # --- world-frame forward progress ---
+    track_world = world_aligned_velocity_reward(env)   # from earlier
+
+    # --- compute pitch magnitude ---
+    pitch = get_pitch_from_quat(env._robot.data.root_quat_w).abs()
+
+    # pitch-based blending
+    weight = torch.sigmoid( 5.0 * (pitch - pitch_thresh) )
+
+    # --- blend ---
+    reward = (1 - weight) * track_base + weight * track_world
+
+    return reward
+
+def world_aligned_velocity_reward(env, scale=1.0):
+    """
+    Reward the robot for producing world-frame forward motion
+    even when pitched or rolled.
+    This rotates the desired command into BASE frame, so the
+    robot learns to compensate for orientation.
+    """
+
+    # desired direction in WORLD frame (normalized)
+    cmd = env._commands[:, :2]                # (vx, vy)
+    cmd_3d = torch.cat([cmd, torch.zeros_like(cmd[:, :1])], dim=1)   # [N,3]
+    cmd_norm = cmd_3d / (torch.norm(cmd_3d, dim=1, keepdim=True) + 1e-6)
+
+    # actual velocity in WORLD frame
+    vel_w = env._robot.data.root_lin_vel_w[:, :3]                   # [N,3]
+
+    # convert ACTUAL velocity into BASE frame
+    base_quat = env._robot.data.root_quat_w                          # [N,4]
+    base_quat_inv = quat_conjugate(base_quat)
+    vel_b = quat_apply(base_quat_inv, vel_w)                         # [N,3]
+
+    # convert DESIRED world direction into BASE frame
+    desired_dir_b = quat_apply(base_quat_inv, cmd_norm)              # [N,3]
+
+    # cosine similarity = alignment
+    alignment = torch.sum(vel_b * desired_dir_b, dim=1)
+
+    # keep reward positive
+    return scale * torch.relu(alignment)
+
+
+
 def track_ang_vel_z_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded yaw rate."""
     err = torch.square(env._commands[:, 2] - env._robot.data.root_ang_vel_b[:, 2])
@@ -68,20 +126,17 @@ def feet_slide(env) -> torch.Tensor:
     foot_vel_xy = env._robot.data.body_lin_vel_w[:, foot_ids, :2]
     return torch.sum(torch.norm(foot_vel_xy, dim=-1) * contact[:, foot_ids], dim=1)
 
-def base_height_l2_lidar(env, height_safety_margin: float = 0.05, target_height: float = 0.30,) -> torch.Tensor:
+def base_height_l2_lidar(env, target: float = 0.30, std: float = 0.05) -> torch.Tensor:
+    """"
+    Penalize deviation of the robot's base height from a terrain-relative target height.
+    To maintain a stable target above whatever terrain the height_scanner detects.
     """
-    Penalize deviation of BASE-TO-TERRAIN distance using LiDAR-based terrain estimate.
-    Uses base frame, so base height = 0, terrain height < 0.
-    """
-    # Terrain height under expected forward region (base frame)
-    terrain_height_b = get_height_lidar(env, channel=0) + height_safety_margin   # [N]
-    # Base-to-terrain distance (in base frame)
-    base_to_ground = -terrain_height_b    # positive in meters
-    # Penalize deviation from target height
-    height_error = base_to_ground - target_height
-    penalty = height_error * height_error
-
-    return penalty
+    base_z = env._robot.data.root_pos_w[:, 2]
+    height_hits_z = env._height_scanner.data.ray_hits_w[..., 2]
+    terrain_z = torch.mean(torch.nan_to_num(height_hits_z,nan=2.0, posinf=2.0, neginf=-2.0), dim=1)
+    adjusted_target_z = terrain_z + target
+    err_sq = torch.square(base_z - adjusted_target_z)
+    return err_sq
 
 
 def smoothness_penalty(env):
@@ -291,7 +346,8 @@ def feet_air_time_rear(env, threshold: float = 0.5, min_cmd_xy: float = 0.1) -> 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
-        "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
+        # "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
+        "track_modified_vel_reward": track_modified_vel_reward(env),
         "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
         "lin_vel_z_penalty": lin_vel_z_penalty(env),
         "ang_vel_xy_penalty": ang_vel_xy_penalty(env),
@@ -304,10 +360,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "energy_penalty": energy_penalty(env),
         "feet_slide_penalty": feet_slide(env),
         "foot_clearance_reward": foot_clearance_reward(env),
-        # "track_heading_reward": track_heading_reward(env),
-        # "stand_still_joint_deviation_l1": stand_still_joint_deviation_l1(env),
         "smoothness_penalty": smoothness_penalty(env),
-        "base_height_l2_lidar": base_height_l2_lidar(env, target_height=0.33),
+        "base_height_l2_lidar": base_height_l2_lidar(env, target=0.30),
         "foot_vertical_accel_reward": foot_vertical_accel_reward(env),
         "backward_vel_penalty": backward_vel_penalty(env),
         "feet_air_time_rear": feet_air_time_rear(env),
@@ -317,7 +371,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        "track_lin_vel_xy_exp": 5.0,
+        # "track_lin_vel_xy_exp": 5.0,
+        "track_modified_vel_reward": 4.0,
         "track_ang_vel_z_exp": 2.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.05,
@@ -329,9 +384,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
         "foot_clearance_reward": 2.5,
-        # "track_heading_reward": 0.1,
         "joint_pos_limit": -0.2,
-        # "stand_still_joint_deviation_l1": -0.01,
         "smoothness_penalty": -0.01,
         "base_height_l2_lidar": -0.5,
         "foot_vertical_accel_reward": 1.4,
@@ -431,3 +484,19 @@ def foot_stuck_mask(env, vel_thresh=0.03, force_thresh=10.0):
 
     stuck = in_contact & (horiz_vel < vel_thresh)
     return stuck.float()  # [N,4]
+
+def get_pitch_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    """
+    quat: [N, 4] as (x, y, z, w)
+    Returns pitch angle in radians.
+    """
+    x = quat[:, 0]
+    y = quat[:, 1]
+    z = quat[:, 2]
+    w = quat[:, 3]
+
+    # formula for pitch (rotation around Y)
+    sinp = 2 * (w * y - z * x)
+    pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
+
+    return pitch
