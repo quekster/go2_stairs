@@ -13,7 +13,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 # from .visualisation import VelArrowsVisualizer
-from isaaclab.utils.math import quat_apply, quat_conjugate
+from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_euler_xyz, quat_mul
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -34,13 +34,9 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._step_counter =0
         self._marker= None
-        self._lidar_buffer = None
+        
         self._lidar_range = 70.0  # metres
 
-        self._ROI_offset =  (0.0, 0.0, 0.0) #from bf
-        self._ROI_box_length = 2.0    # metres forward (x direction)
-        self._ROI_box_width = 1.0      # metres sideways (y direction)
-        self._ROI_box_height = 0.5     # metres up (z direction)
 
         # Timers for command resampling
         self._cmd_timer = torch.zeros(self.num_envs, device=self.device)
@@ -86,6 +82,8 @@ class Go2HybridEnv(DirectRLEnv):
                 "foot_vertical_accel_reward",
                 "backward_vel_penalty",
                 "feet_air_time_rear",
+                "forward_progress_world",
+                "rear_match_front",
             ]
         }
 
@@ -124,21 +122,7 @@ class Go2HybridEnv(DirectRLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
-       
-        # ------- ROI Debug Markers (set up once) ------- #
-        self._ROI_debug_marker_cfg = VisualizationMarkersCfg(
-            prim_path="/World/DebugROI",
-            markers={
-                "roi_corner": sim_utils.SphereCfg(
-                    radius=0.05,
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),  # green
-                ),
-                # "base_frame": sim_utils.UsdFileCfg(
-                #     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
-                #     scale=(0.3, 0.3, 0.3),
-                # ),
-            },
-        )       
+           
 
         _origin_debug_marker_cfg = VisualizationMarkersCfg(
             prim_path="/World/OriginMarker",
@@ -180,10 +164,6 @@ class Go2HybridEnv(DirectRLEnv):
         _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
         _origin_debug_marker.visualize(translations=translations)
-
-        self._roi_debug_markers = VisualizationMarkers(self._ROI_debug_marker_cfg)
-        self._roi_marker_type = list(self._ROI_debug_marker_cfg.markers.keys())  # ['roi_corner', 'base_frame']
-        self._roi_marker_indices = torch.tensor([0, 0, 0, 0, 1], device=self.device)  # 4 corners + 1 base frame marker
 
         self._lidar_origin_debug_marker = VisualizationMarkers(_lidar_origin_debug_marker_cfg)
         self._lidar_origin_marker_type = list(_lidar_origin_debug_marker_cfg.markers.keys())  # ['lidar_origin_box']
@@ -267,25 +247,10 @@ class Go2HybridEnv(DirectRLEnv):
         )
         self._step_counter += 1
 
-        #-----DEBUGGER for hits (base/world)--------#
-
-        #hits_b = self.get_bf_hits_normalised()
-        #print(f"[DEBUG] Step {self._step_counter} — lidar_obs shape {lidar_obs.shape}")
-        #print("Current base frame hits:", hits_b[0])
-        # print(f"[DEBUG] Frame_t-2 hits: {lidar_obs[0].cpu().numpy()}")
-        # print("------------------NEXT STEP------------------")
 
         #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
-        # self._visualize_roi_box()
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
-
-        # if self._step_counter % 50 == 0:  # every 100 steps
-        #     #self.plot_lidar_3d(env_id=0, show_history=False)
-        #     hits_b = self.get_bf_hits(torch.tensor([0], device=self.device))[0]
-        #     hits_ds = self.get_hits_downsampled(hits_b)
-        #     hits = self.get_hits_norm(hits_ds)
-        #     print("Current hits:", hits)
         return {
             "policy": obs_policy,      # for actor network
             "critic": privileged,      # for critic network
@@ -310,17 +275,6 @@ class Go2HybridEnv(DirectRLEnv):
 
         # --- Combine ---
         terminated = base_contact | oob | flipped | stuck_term
-
-        # --- Optional Debug ---
-        # if torch.any(terminated):
-        #     num_contact = torch.count_nonzero(base_contact).item()
-        #     num_oob = torch.count_nonzero(oob).item()
-        #     num_timeout = torch.count_nonzero(time_outs).item()
-
-        #     print(
-        #         f"[STEP {self._step_counter:05d}] Terminated={torch.count_nonzero(terminated).item()} | "
-        #         f"BaseContact={num_contact}, OOB={num_oob}, Timeout={num_timeout}"
-        #     )
 
 
         return terminated, time_outs
@@ -385,20 +339,6 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
 
-
-        # initialisation or clearing of lidar buffer for reset envs
-        if self._lidar_buffer is None or self._lidar_buffer.shape[0] != self.num_envs:
-            # get number of rays by sampling current hits
-            hits0 = self._lidar_scanner.data.ray_hits_w[env_ids]  # shape (envs, R, 3)
-            num_rays = hits0.shape[1]
-            # buffer shape: (num_envs, buffer_size, num_rays, 3)
-            self._lidar_buffer = torch.zeros(
-                (self.num_envs, self._lidar_buffer_size, num_rays, 3),
-                dtype=hits0.dtype, device=self.device
-            )
-        else:
-            # zero‐out the buffer entries for reset envs
-            self._lidar_buffer[env_ids] = 0.0
 
         # --- Immediately sample a new command at episode start ---
         self.resample_commands(env_ids)
@@ -466,68 +406,11 @@ class Go2HybridEnv(DirectRLEnv):
         return hits_b
 
 
-
-    def get_hits_downsampled(self, hits_b: torch.Tensor):
-        """
-        Downsample LiDAR points by retaining only those within a box region in front of the robot.
-        - Points outside the ROI are discarded (not zeroed).
-        - NaN points (no hit) are replaced with max lidar range.
-        """
-        # --- Replace NaNs with max range first ---
-        hits_b = torch.nan_to_num(hits_b, nan=self._lidar_range)
-
-        # --- Define ROI bounds (in base frame) ---
-        x_off, y_off, z_off = self._ROI_offset
-        x_min, x_max = x_off, x_off + self._ROI_box_length
-        y_min, y_max = -self._ROI_box_width / 2 + y_off, self._ROI_box_width / 2 + y_off
-        # We’re ignoring z-axis limits intentionally for your use case
-
-        # --- Create mask for points inside ROI ---
-        mask = (
-            (hits_b[..., 0] >= x_min)
-            & (hits_b[..., 0] <= x_max)
-            & (hits_b[..., 1] >= y_min)
-            & (hits_b[..., 1] <= y_max)
-        )
-
-        # Replace outside-ROI points with max lidar range
-        hits_filtered = hits_b.clone()
-        hits_filtered[~mask] = self._lidar_range
-
-        return hits_filtered  
-
-
     def get_hits_norm(self, hits_ds: torch.Tensor):
         """Normalize to 70 m range after downsampling."""
-
-        # hits_b = self.get_bf_hits(env_ids)
-        # hits_b_ds = self.get_hits_downsampled(hits_b)
-
         hits_b_ds_norm = hits_ds / self._lidar_range
         return hits_b_ds_norm
-    
-
-    def get_stacked_hits(self, env_ids=None):
-        """Temporal stack of normalized, downsampled LiDAR hits."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-
-        # --- Proper call sequence ---
-        hits_b = self.get_bf_hits(env_ids)
-        # hits_ds = self.get_hits_downsampled(hits_b)
-        # current_hits_b = self.get_hits_norm(hits_ds)
-        current_hits_b = self.get_hits_norm(hits_b)
-
-        # --- Buffer stacking ---
-        buff = self._lidar_buffer  # shape: [num_envs, buffer_size, R, 3]
-        buff[env_ids, :-1, :, :] = buff[env_ids, 1:, :, :]
-        buff[env_ids, -1, :, :] = current_hits_b
-
-        N = current_hits_b.shape[0]
-        B = self._lidar_buffer_size
-        R = current_hits_b.shape[1]
-        stacked = buff[env_ids].reshape(N, B * R * 3)
-        return stacked     
+     
     
     def get_single_lidar_obs(self, env_ids=None):
         """
@@ -550,127 +433,6 @@ class Go2HybridEnv(DirectRLEnv):
         hits_flat = hits_norm.reshape(self.num_envs, -1)
 
         return hits_flat      
-
-    def plot_lidar_3d(self, env_id=0, frame="world", show_history=True):
-        """
-        Visualize the 3D LiDAR point cloud for a given environment.
-        Can plot either a single frame or the full temporal stack from get_stacked_hits().
-
-        Args:
-            env_id (int): Which environment to visualize.
-            frame (str): "world" or "base" (base recommended since your LiDAR is base-frame aligned).
-            show_history (bool): If True, use temporally stacked hits; else use current hits only.
-        """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import omni.timeline
-
-        tl = omni.timeline.get_timeline_interface()
-        tl.pause()
-
-        if show_history:
-            # Retrieve stacked LiDAR buffer (flattened)
-            stacked_hits = self.get_stacked_hits(torch.tensor([env_id], device=self.device))  # shape [1, B*R*3]
-            B = self._lidar_buffer_size
-            R = self._lidar_scanner.cfg.pattern_cfg.num_rays
-            hits = stacked_hits.view(B, R, 3).detach().cpu().numpy()  # [B, R, 3]
-
-            # Combine or colorize frames
-            colors = plt.cm.plasma(np.linspace(0, 1, B))  # color gradient for temporal frames
-        else:
-            # Single current frame (normalized)
-            hits = self.get_hits_norm(torch.tensor([env_id], device=self.device))[0].detach().cpu().numpy()
-            B = 1
-            colors = [plt.cm.plasma(0.5)]
-
-        # Remove invalid hits (NaNs or infs)
-        mask = np.isfinite(hits).all(axis=-1)
-        hits = np.where(mask[..., None], hits, np.nan)
-
-        # Create 3D scatter
-        fig = plt.figure(figsize=(8, 6))
-        ax = fig.add_subplot(111, projection="3d")
-
-        # --- ensure hits has shape [B, R, 3] ---
-        if hits.ndim == 2 and hits.shape[1] == 3:
-            # single frame -> add a temporal dimension
-            hits = hits[None, ...]        # [1, R, 3]
-            B = 1
-        elif hits.ndim == 1:
-            # completely flattened vector -> reshape to (-1, 3)
-            hits = hits.reshape(1, -1, 3)
-            B = 1
-        elif hits.ndim == 3:
-            # already correct shape [B, R, 3]
-            B = hits.shape[0]
-        else:
-            raise ValueError(f"Unexpected LiDAR hits shape: {hits.shape}")
-        
-        hits = hits * self._lidar_range  # Uncomment to un-normalize for plotting
-
-        # Plot each temporal frame
-        for b in range(B):
-
-            valid = np.isfinite(hits[b]).all(axis=1)
-            if np.sum(valid) == 0:
-                continue
-            ax.scatter(
-                hits[b, valid, 0],  # x coords of valid hits in frame b
-                hits[b, valid, 1],  # y coords of valid hits in frame b
-                hits[b, valid, 2],  # z coords of valid hits in frame b
-                s=2,
-                c=[colors[b]] if B > 1 else hits[b, valid, 2],
-                cmap=None if B > 1 else "viridis",
-                label=f"frame {b}" if B > 1 else None,
-            )
-
-        
-        ax.set_xlabel("X (normalized)")
-        ax.set_ylabel("Y (normalized)")
-        ax.set_zlabel("Z (normalized)")
-        title = f"LiDAR hits (stacked={show_history}) – Env {env_id}, Step {self._step_counter}"
-        ax.set_title(title)
-
-        # Optional equal aspect ratio
-        all_hits = hits.reshape(-1, 3)
-        finite = np.isfinite(all_hits).all(axis=1)
-        if np.sum(finite) > 0:
-            max_range = np.ptp(all_hits[finite], axis=0).max() / 2.0
-            mid = np.mean(all_hits[finite], axis=0)
-            ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
-            ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
-            ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
-
-        if B > 1:
-            ax.legend(loc="upper right", fontsize="x-small")
-
-        plt.tight_layout()
-        plt.show(block=True)
-        plt.close()
-        tl.play()
-
-    def _visualize_roi_box(self, env_id=0):
-        """Visualize ROI corners relative to the robot base frame."""
-        base_pos = self._robot.data.root_pos_w[env_id]
-        base_quat = self._robot.data.root_quat_w[env_id]
-
-        # --- Compute ROI corners in base frame ---
-        x_off, y_off, _ = self._ROI_offset
-        x_min, x_max = x_off, x_off + self._ROI_box_length
-        y_min, y_max = -self._ROI_box_width / 2 + y_off, self._ROI_box_width / 2 + y_off
-        roi_corners_b = torch.tensor([
-            [x_min, y_min, 0.0],
-            [x_min, y_max, 0.0],
-            [x_max, y_min, 0.0],
-            [x_max, y_max, 0.0],
-        ], dtype=torch.float32, device=self.device)
-
-        # --- Transform corners to world frame ---
-        roi_corners_w = base_pos.unsqueeze(0) + quat_apply(base_quat.unsqueeze(0), roi_corners_b)
-        translations = torch.cat([roi_corners_w, base_pos.unsqueeze(0)], dim=0)
-
-        # Visualize ROI + base frame marker
-        self._roi_debug_markers.visualize(translations=translations, marker_indices=self._roi_marker_indices)
 
     def _visualize_lidar_origin(self, env_id=0):
         """Visualize a small sphere where the RayCaster (LiDAR) is attached."""
@@ -695,9 +457,6 @@ class Go2HybridEnv(DirectRLEnv):
         scale_mult=3.0,
         height_offset=0.3,
     ):
-        import torch
-        import numpy as np
-        from isaaclab.utils.math import quat_mul, quat_from_euler_xyz
 
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)

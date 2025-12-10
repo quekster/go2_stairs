@@ -266,13 +266,6 @@ def foot_clearance_reward(
     return reward
 
 
-def stand_still_joint_deviation_l1(env, command_threshold: float = 0.06) -> torch.Tensor:
-    """Penalize offsets from the default joint positions when the command is very small."""
-    commands = env._commands # [num_envs, 4]: [vx, vy, yaw_rate, heading]
-    joint_dev = torch.sum(torch.abs(env._robot.data.joint_pos - env._robot.data.default_joint_pos), dim=1) # L1 deviation per environment (sum over all joints)
-    cmd_mag = torch.norm(commands[:, :2], dim=1) # magnitude of (vx, vy) command
-    return joint_dev * (cmd_mag < command_threshold)
-
 def foot_vertical_accel_reward(env, scale=0.5):
     """
     Reward upward vertical acceleration for ANY stuck foot (front or hind).
@@ -341,6 +334,75 @@ def feet_air_time_rear(env, threshold: float = 0.5, min_cmd_xy: float = 0.1) -> 
 
     return r * moving
 
+def forward_progress_world(env, min_speed: float = 0.0) -> torch.Tensor:
+    """
+    Simple positive reward for forward COM motion in WORLD frame.
+    Encourages the robot to actually go up the stairs instead of stalling.
+    """
+    vx_w = env._robot.data.root_lin_vel_w[:, 0]  # +X is stair direction
+    # Reward only forward motion above a small threshold
+    return torch.clamp(vx_w - min_speed, min=0.0)
+
+def rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0):
+    """
+    Encourage rear feet to place themselves where the front feet have stabilized.
+    Mimics natural cat-like tracking where the hind foot steps into the front foot's position.
+
+    Args:
+        pos_weight:      Scales the positional matching reward.
+        vel_thresh:      Threshold (m/s) for detecting stable front feet.
+        offset_forward:  Optional forward bias to encourage stepping slightly ahead of the front foot.
+    """
+
+
+    # --- Extract foot positions & velocities in world frame ---
+    pos_w = env._robot.data.body_pos_w[:, env._feet_ids, :]        # [N,4,3]
+    vel_w = env._robot.data.body_lin_vel_w[:, env._feet_ids, :]    # [N,4,3]
+
+    forces = env._contact_sensor.data.net_forces_w[:, env._feet_ids, :]  # [N,4,3]
+    contact = (forces.norm(dim=-1) > 5.0).float()               # [N,4]
+
+    # FRONT feet
+    FL = pos_w[:, 0, :]
+    FR = pos_w[:, 1, :]
+
+    FL_vel = torch.norm(vel_w[:, 0, :2], dim=1)    # horizontal velocity
+    FR_vel = torch.norm(vel_w[:, 1, :2], dim=1)
+
+    FL_contact = contact[:, 0]   # 1 if in contact, else 0
+    FR_contact = contact[:, 1]
+
+    # REAR feet
+    RL = pos_w[:, 2, :]
+    RR = pos_w[:, 3, :]
+
+    # --- Condition: front foot must be stable AND in contact ---
+    FL_stable = ((FL_vel < vel_thresh) & (FL_contact > 0)).float().unsqueeze(-1)   # [N,1]
+    FR_stable = ((FR_vel < vel_thresh) & (FR_contact > 0)).float().unsqueeze(-1)
+
+    # --- Target footholds ---
+    target_FL = FL.clone()
+    target_FR = FR.clone()
+
+    # Optional forward offset in world X
+    target_FL[:, 0] += offset_forward
+    target_FR[:, 0] += offset_forward
+
+    # --- Errors ---
+    err_RL = torch.norm(RL - target_FL, dim=1)   # RL → FL
+    err_RR = torch.norm(RR - target_FR, dim=1)   # RR → FR
+
+    # Apply only when the corresponding front foot is stable + grounded
+    err_RL = err_RL * FL_stable.squeeze(-1)
+    err_RR = err_RR * FR_stable.squeeze(-1)
+
+    # --- Positive reward via exponential decay ---
+    # Higher when rear foot is closer to the front foothold
+    reward = torch.exp(-pos_weight * (err_RL + err_RR))
+
+    return reward
+
+
 
 
 
@@ -365,6 +427,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_vertical_accel_reward": foot_vertical_accel_reward(env),
         "backward_vel_penalty": backward_vel_penalty(env),
         "feet_air_time_rear": feet_air_time_rear(env),
+        "forward_progress_world": forward_progress_world(env),
+        "rear_match_front": rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0),
 
 
     }
@@ -372,7 +436,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     # --- Scales: tuned for flat-ground learning ---
     w = {
         # "track_lin_vel_xy_exp": 5.0,
-        "track_modified_vel_reward": 4.0,
+        "track_modified_vel_reward": 2.0,
         "track_ang_vel_z_exp": 2.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.05,
@@ -388,8 +452,10 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "smoothness_penalty": -0.01,
         "base_height_l2_lidar": -0.5,
         "foot_vertical_accel_reward": 1.4,
-        "backward_vel_penalty": -1.0,
+        "backward_vel_penalty": -2.0,
         "feet_air_time_rear": 3.0,
+        "forward_progress_world": 2.0,
+        "rear_match_front": 2.0,
     }
 
     dt = env.step_dt
@@ -453,11 +519,9 @@ def get_height_lidar(env, channel: int = None) -> torch.Tensor:
     # 5) Extract z-values in BASE frame
     z_vals = ch_hits[..., 2]            # negative = below robot
 
-    # 6) Mean terrain height estimate
-    #terrain_height_b = torch.mean(z_vals, dim=1)
     
-    #testing to take max instead:
-    terrain_height_b = torch.max(z_vals, dim=1).values
+    # terrain_height_b = torch.max(z_vals, dim=1).values
+    terrain_height_b = torch.mean(z_vals, dim=1)
 
     # Debug print
     # if env._step_counter % 50 == 0:  # every 100 steps
@@ -465,8 +529,6 @@ def get_height_lidar(env, channel: int = None) -> torch.Tensor:
     # print("LiDAR hits (base frame):", hits_b) 
     # print("Estimated terrain height (base frame):", terrain_height_b)
     # print("-----------")
-
-    
 
     return terrain_height_b
 
