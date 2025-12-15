@@ -103,3 +103,19 @@ def stuck(env, vel_thresh: float = 0.03, cmd_thresh: float = 0.2, stuck_time: fl
     stuck_mask = env._stuck_counter >= threshold_steps
     return stuck_mask
 
+def end_point_termination(env) -> torch.Tensor:
+    """
+    Terminate when the robot reaches the end point.
+    """
+    # root position in WORLD frame
+    x_pos = env._robot.data.root_pos_w[:, 0]   # [N]
+    end_point = env.end_point_pos              # float
+    return x_pos > end_point
+
+def mid_point_termination(env) -> torch.Tensor:
+    """
+    Terminate when the robot reaches the mid point.
+    """
+    x_pos = env._robot.data.root_pos_w[:, 0]
+    mid_point = env.mid_point_pos
+    return x_pos > mid_point

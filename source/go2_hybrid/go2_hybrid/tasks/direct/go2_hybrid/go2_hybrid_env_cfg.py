@@ -50,6 +50,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         #terrain_generator=terrain_gen,
         terrain_type="usd",
         usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_10_colour.usdz",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/icra_map_flat_new.usdz",
         
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",

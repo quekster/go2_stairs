@@ -158,11 +158,24 @@ def undesired_contacts(env, threshold: float = 1.0) -> torch.Tensor:
     is_contact = torch.max(torch.norm(f[:, :, env._undesired_contact_body_ids], dim=-1), dim=1)[0] > threshold
     return torch.sum(is_contact, dim=1)
 
-
+#Phase 0: flat walking
 def flat_orientation(env) -> torch.Tensor:
     """Penalize non-flat base orientation using L2 squared kernel."""
     result = torch.sum(torch.square(env._robot.data.projected_gravity_b[:, :2]), dim=1)
     return result
+
+def flat_orientation_roll(env) -> torch.Tensor:
+    """
+    Penalize ROLL deviation only.
+    Pitch is intentionally NOT penalized so the robot can lean forward
+    while climbing stairs.
+    """
+    g_b = env._robot.data.projected_gravity_b   # [N,3]
+
+    roll_component = g_b[:, 0]    # X component → roll
+    # pitch_component = g_b[:, 1] # Y component → pitch (ignored)
+
+    return torch.square(roll_component)
 
 def joint_pos_limits(env) -> torch.Tensor:
     """Penalize joint positions outside soft limits."""
@@ -343,17 +356,50 @@ def forward_progress_world(env, min_speed: float = 0.0) -> torch.Tensor:
     # Reward only forward motion above a small threshold
     return torch.clamp(vx_w - min_speed, min=0.0)
 
-def rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0):
+def forward_progress_position(env, cmd_thresh: float = 0.05, delta_pos_scale: float = 1.0) -> torch.Tensor:
+    """
+    Position-based forward progress reward, but only when the robot
+    is commanded to move forward.
+
+    Reward = max( x(t) - x(t-1), 0 ) if command_vx > cmd_thresh
+    Reward = 0 otherwise.
+    """
+
+    # Current world-frame X position of the base
+    x_now = env._robot.data.root_pos_w[:, 0]          # [N]
+
+    # Previous X positions (must be stored in the env)
+    x_prev = env._prev_root_x                         # [N]
+
+    # Positional delta
+    delta = x_now - x_prev
+
+    # Positive movement only
+    delta_pos = torch.clamp(delta, min=0.0) * delta_pos_scale   # [N]
+
+    # Retrieve forward command (body-frame desired vx)
+    cmd_vx = env._commands[:, 0]                       # [N]
+    
+    # Condition mask: only apply reward if commanded to move forward
+    moving_mask = (cmd_vx > cmd_thresh).float()        # [N]
+
+    # Final gated reward
+    reward = delta_pos * moving_mask
+
+    return reward
+
+
+def rear_match_front(env, pos_weight=3.0, vel_thresh=0.05, offset_forward=0.0, max_dist=0.3):
     """
     Encourage rear feet to place themselves where the front feet have stabilized.
     Mimics natural cat-like tracking where the hind foot steps into the front foot's position.
 
     Args:
-        pos_weight:      Scales the positional matching reward.
+        pos_weight:      Scales the positional matching reward (stricter = higher value).
         vel_thresh:      Threshold (m/s) for detecting stable front feet.
         offset_forward:  Optional forward bias to encourage stepping slightly ahead of the front foot.
+        max_dist:        Maximum distance for reward - no reward if rear feet are further than this.
     """
-
 
     # --- Extract foot positions & velocities in world frame ---
     pos_w = env._robot.data.body_pos_w[:, env._feet_ids, :]        # [N,4,3]
@@ -372,13 +418,15 @@ def rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0):
     FL_contact = contact[:, 0]   # 1 if in contact, else 0
     FR_contact = contact[:, 1]
 
-    # REAR feet
+    # REAR feet positions and velocities
     RL = pos_w[:, 2, :]
     RR = pos_w[:, 3, :]
+    RL_vel = vel_w[:, 2, :]  # Full 3D velocity for motion check
+    RR_vel = vel_w[:, 3, :]
 
     # --- Condition: front foot must be stable AND in contact ---
-    FL_stable = ((FL_vel < vel_thresh) & (FL_contact > 0)).float().unsqueeze(-1)   # [N,1]
-    FR_stable = ((FR_vel < vel_thresh) & (FR_contact > 0)).float().unsqueeze(-1)
+    FL_stable = ((FL_vel < vel_thresh) & (FL_contact > 0)).float()   # [N]
+    FR_stable = ((FR_vel < vel_thresh) & (FR_contact > 0)).float()
 
     # --- Target footholds ---
     target_FL = FL.clone()
@@ -388,28 +436,153 @@ def rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0):
     target_FL[:, 0] += offset_forward
     target_FR[:, 0] += offset_forward
 
-    # --- Errors ---
+    # --- Errors (distance to target) ---
     err_RL = torch.norm(RL - target_FL, dim=1)   # RL → FL
     err_RR = torch.norm(RR - target_FR, dim=1)   # RR → FR
 
-    # Apply only when the corresponding front foot is stable + grounded
-    err_RL = err_RL * FL_stable.squeeze(-1)
-    err_RR = err_RR * FR_stable.squeeze(-1)
+    # --- Distance cutoff: no reward if too far ---
+    close_enough_RL = (err_RL < max_dist).float()
+    close_enough_RR = (err_RR < max_dist).float()
 
-    # --- Positive reward via exponential decay ---
-    # Higher when rear foot is closer to the front foothold
+    # --- Motion toward target requirement ---
+    # Direction vectors from rear to target
+    dir_RL = target_FL - RL  # [N, 3]
+    dir_RR = target_FR - RR  # [N, 3]
+
+    # Normalize directions
+    dir_RL_norm = dir_RL / (torch.norm(dir_RL, dim=1, keepdim=True) + 1e-6)
+    dir_RR_norm = dir_RR / (torch.norm(dir_RR, dim=1, keepdim=True) + 1e-6)
+
+    # Dot product: positive means moving toward target
+    moving_toward_RL = torch.sum(RL_vel * dir_RL_norm, dim=1)
+    moving_toward_RR = torch.sum(RR_vel * dir_RR_norm, dim=1)
+
+    # Gate: reward if moving toward target OR already very close (within 10cm)
+    motion_gate_RL = ((moving_toward_RL > 0.0) | (err_RL < 0.1)).float()
+    motion_gate_RR = ((moving_toward_RR > 0.0) | (err_RR < 0.1)).float()
+
+    # Apply all gates
+    err_RL = err_RL * FL_stable * close_enough_RL * motion_gate_RL
+    err_RR = err_RR * FR_stable * close_enough_RR * motion_gate_RR
+
+    # --- Positive reward via exponential decay (now stricter) ---
+    # With pos_weight=3.0: reward drops to 0.05 at 0.5m (vs 0.6 with pos_weight=1.0)
     reward = torch.exp(-pos_weight * (err_RL + err_RR))
+
+    # Zero reward if no valid targets
+    has_valid_target = ((FL_stable + FR_stable) > 0).float()
+    reward = reward * has_valid_target
+
+    return reward
+
+def stagnation_penalty(env, vel_thresh: float = 0.05, position_thresh: float = 0.02, window_steps: int = 50) -> torch.Tensor:
+    """
+    Penalize lack of progress when commanded to move forward.
+    Uses a rolling window to detect if robot is stuck over ~1 second.
+
+    Args:
+        vel_thresh: Velocity threshold below which robot is considered stopped (m/s).
+        position_thresh: Position change threshold over window (m).
+        window_steps: Number of steps for rolling window (~1 second at 50Hz).
+
+    Requires env to maintain:
+        env._stagnation_buffer: [N, window_steps] rolling position buffer
+        env._stagnation_idx: Current index in buffer
+    """
+    # Initialize buffers if not exists
+    if not hasattr(env, "_stagnation_buffer"):
+        env._stagnation_buffer = torch.zeros(
+            env.num_envs, window_steps, device=env.device
+        )
+        env._stagnation_idx = 0
+
+    current_x = env._robot.data.root_pos_w[:, 0]
+
+    # Store current position in rolling buffer
+    env._stagnation_buffer[:, env._stagnation_idx] = current_x
+    env._stagnation_idx = (env._stagnation_idx + 1) % window_steps
+
+    # Compute position change over window
+    oldest_x = env._stagnation_buffer[:, env._stagnation_idx]
+    position_change = torch.abs(current_x - oldest_x)
+
+    # Low velocity check
+    vx_w = torch.abs(env._robot.data.root_lin_vel_w[:, 0])
+    low_velocity = (vx_w < vel_thresh).float()
+
+    # Low position change check
+    low_progress = (position_change < position_thresh).float()
+
+    # Forward command check
+    cmd_vx = env._commands[:, 0]
+    forward_intent = (cmd_vx > 0.1).float()
+
+    # Penalty if all three conditions met: commanded forward, low velocity, no position change
+    penalty = low_velocity * low_progress * forward_intent
+
+    return penalty
+
+
+def foot_lateral_separation_penalty(env, target_width: float = 0.30) -> torch.Tensor:
+    """
+    Penalize deviation of left/right foot lateral separation from a single target value,
+    for both front and rear pairs.
+
+    Args:
+        target_width: Desired lateral (Y-axis) separation between L/R feet (meters).
+    """
+    # Foot positions in WORLD frame: [N, 4, 3]
+    feet_w = env._robot.data.body_pos_w[:, env._feet_ids, :]
+
+    # Assuming order: [FL, FR, RL, RR]
+    FL_y = feet_w[:, 0, 1]
+    FR_y = feet_w[:, 1, 1]
+    RL_y = feet_w[:, 2, 1]
+    RR_y = feet_w[:, 3, 1]
+
+    # Lateral separations
+    front_lat_dist = torch.abs(FL_y - FR_y)  # [N]
+    rear_lat_dist  = torch.abs(RL_y - RR_y)  # [N]
+
+    # Squared deviation from target for both pairs
+    front_err = (front_lat_dist - target_width).pow(2)
+    rear_err  = (rear_lat_dist  - target_width).pow(2)
+
+    penalty = front_err + rear_err  # [N]
+
+    return penalty
+
+def hip_deflection_l2(env) -> torch.Tensor:
+    """
+    Penalize deviations from neutral hip deflection using an L2 kernel.
+    Uses only the 4 hip joints (indices 0–3 in your joint order).
+    """
+    hip_pos = env._robot.data.joint_pos[:, 0:4]   # [N, 4]
+    # L2 penalty (average over 4 hips)
+    penalty = torch.sum(hip_pos ** 2, dim=1) / 4.
+    return penalty
+
+def track_center_path(env, std: float = 0.15) -> torch.Tensor:
+    """
+    Reward the robot for staying close to the centerline of the stair path.
+    World-frame Y = 0 is assumed to be the ideal straight path.
+
+    A Gaussian reward: exp(-(y^2) / std^2)
+    """
+    # world-frame Y position of robot base
+    y = env._robot.data.root_pos_w[:, 1]  # [N]
+
+    # Gaussian falloff: centered at 0, max reward = 1
+    reward = torch.exp(-(y * y) / (std * std))
 
     return reward
 
 
 
-
-
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
-        # "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
-        "track_modified_vel_reward": track_modified_vel_reward(env),
+        "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
+        # "track_modified_vel_reward": track_modified_vel_reward(env),
         "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
         "lin_vel_z_penalty": lin_vel_z_penalty(env),
         "ang_vel_xy_penalty": ang_vel_xy_penalty(env),
@@ -417,7 +590,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": joint_acc_penalty(env),
         "action_rate_penalty": action_rate_penalty(env),
         "undesired_contacts": undesired_contacts(env),
-        "flat_orientation": flat_orientation(env),
+        "flat_orientation": flat_orientation_roll(env),
         "joint_pos_limit": joint_pos_limits(env),  # <-- NEW
         "energy_penalty": energy_penalty(env),
         "feet_slide_penalty": feet_slide(env),
@@ -427,35 +600,42 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_vertical_accel_reward": foot_vertical_accel_reward(env),
         "backward_vel_penalty": backward_vel_penalty(env),
         "feet_air_time_rear": feet_air_time_rear(env),
-        "forward_progress_world": forward_progress_world(env),
+        "forward_progress": forward_progress_position(env, delta_pos_scale=100.0),
         "rear_match_front": rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0),
-
+        "stagnation_penalty": stagnation_penalty(env),
+        "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
+        # "hip_deflection_l2": hip_deflection_l2(env),
+        "track_center_path": track_center_path(env),
 
     }
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        # "track_lin_vel_xy_exp": 5.0,
-        "track_modified_vel_reward": 2.0,
-        "track_ang_vel_z_exp": 2.0,
+        "track_lin_vel_xy_exp": 8.0,
+        # "track_modified_vel_reward": 2.0,
+        "track_ang_vel_z_exp": 1.0,
          "lin_vel_z_penalty": -0.5,       
-        "ang_vel_xy_penalty": -0.05,
+        "ang_vel_xy_penalty": -0.5,
         "joint_torque_penalty": -2.0e-5,
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
         "undesired_contacts": -1.0,
-        "flat_orientation": -0.2,
+        "flat_orientation": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
         "foot_clearance_reward": 2.5,
-        "joint_pos_limit": -0.2,
+        "joint_pos_limit": -0.6,
         "smoothness_penalty": -0.01,
         "base_height_l2_lidar": -0.5,
         "foot_vertical_accel_reward": 1.4,
-        "backward_vel_penalty": -2.0,
-        "feet_air_time_rear": 3.0,
-        "forward_progress_world": 2.0,
+        "backward_vel_penalty": -4.0,
+        "feet_air_time_rear": 2.0,
+        "stagnation_penalty": -3.0,
+        "forward_progress": 5.0,
         "rear_match_front": 2.0,
+        "foot_lateral_separation_penalty": -4.0,
+        # "hip_deflection_l2": -1.0,
+        "track_center_path": 1.0,
     }
 
     dt = env.step_dt

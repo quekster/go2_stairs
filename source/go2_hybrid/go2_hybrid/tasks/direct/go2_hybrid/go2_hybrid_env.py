@@ -23,13 +23,18 @@ import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
 from .rewards import compute_all_rewards
-from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck
+from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination, mid_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
     
     cfg: Go2HybridEnvCfg
 
     def __init__(self, cfg: Go2HybridEnvCfg, render_mode: str | None = None, **kwargs):
+        
+        #mid and end point positions
+        self.end_point_pos = 3.0   
+        self.mid_point_pos = 0.4        
+        
         super().__init__(cfg, render_mode, **kwargs)
 
         self._step_counter =0
@@ -55,16 +60,23 @@ class Go2HybridEnv(DirectRLEnv):
         # X/Y linear velocity (body frame) + yaw rate commands
         self._commands = torch.zeros(self.num_envs, 4, device=self.device)
 
+        self._prev_root_x = torch.zeros(self.num_envs, device=self.device)
+
+
         #robot spawn offsets
         self._base_x_offset = 2.5
         self._base_z_offset = 0.4
+        # self._base_x_offset = -1.0
+        # self._base_z_offset = 0.55
+
+   
 
         
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                # "track_lin_vel_xy_exp",
-                "track_modified_vel_reward",
+                "track_lin_vel_xy_exp",
+                # "track_modified_vel_reward",
                 "track_ang_vel_z_exp",
                 "lin_vel_z_penalty",
                 "ang_vel_xy_penalty",
@@ -82,8 +94,12 @@ class Go2HybridEnv(DirectRLEnv):
                 "foot_vertical_accel_reward",
                 "backward_vel_penalty",
                 "feet_air_time_rear",
-                "forward_progress_world",
+                "stagnation_penalty",
+                "foot_lateral_separation_penalty",
+                "forward_progress",
                 "rear_match_front",
+                # "hip_deflection_l2",
+                "track_center_path",
             ]
         }
 
@@ -122,6 +138,25 @@ class Go2HybridEnv(DirectRLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
+        _end_point_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/EndPointMarker",
+            markers={
+                "origin_box": sim_utils.SphereCfg(
+                    radius=0.05,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                ),
+            },
+        )
+
+        _mid_point_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/EndPointMarker",
+            markers={
+                "origin_box": sim_utils.SphereCfg(
+                    radius=0.05,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
+                ),
+            },
+        )
            
 
         _origin_debug_marker_cfg = VisualizationMarkersCfg(
@@ -160,6 +195,13 @@ class Go2HybridEnv(DirectRLEnv):
             },            
         )
 
+        _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
+        translations = torch.tensor([[self.end_point_pos, 0.0, 0.05]], dtype=torch.float32)  # shape (1,3)
+        _end_point_marker.visualize(translations=translations)
+
+        _mid_point_marker = VisualizationMarkers(_mid_point_marker_cfg)
+        translations = torch.tensor([[self.mid_point_pos, 0.0, 0.8]], dtype=torch.float32)  # shape (1,3)
+        _mid_point_marker.visualize(translations=translations)
 
         _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
@@ -251,6 +293,18 @@ class Go2HybridEnv(DirectRLEnv):
         #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
+
+        # 1. Read current x position
+        x_now = self._robot.data.root_pos_w[:, 0]
+
+        # 2. Compute dx BEFORE updating _prev_root_x
+        # dx = x_now - self._prev_root_x
+        # print("dx:", dx)
+
+        # 3. Update _prev_root_x AFTER computing dx
+        self._prev_root_x = x_now.clone()
+
+
         return {
             "policy": obs_policy,      # for actor network
             "critic": privileged,      # for critic network
@@ -273,9 +327,11 @@ class Go2HybridEnv(DirectRLEnv):
         flipped = flipped_over(self, threshold=-0.2)
         stuck_term = stuck(self)
 
-        # --- Combine ---
-        terminated = base_contact | oob | flipped | stuck_term
+        # end_term = end_point_termination(self)
+        mid_term = mid_point_termination(self)
 
+        # --- Combine ---
+        terminated = base_contact | oob | flipped | stuck_term | mid_term
 
         return terminated, time_outs
 
@@ -338,6 +394,16 @@ class Go2HybridEnv(DirectRLEnv):
         self._stand_height_ref[env_ids] = (self._robot.data.default_root_state[env_ids][:, 2] + origins[env_ids][:, 2])
 
         self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
+
+        # # Reset new reward trackers (for forward_progress_position and stagnation_penalty)
+        # if hasattr(self, "_prev_base_x"):
+        #     self._prev_base_x[env_ids] = self._robot.data.root_pos_w[env_ids, 0].clone()
+
+        # Reset new reward trackers (for stagnation_penalty)
+        if hasattr(self, "_stagnation_buffer"):
+            # Fill the rolling buffer with current position so stagnation doesn't trigger immediately
+            current_x = self._robot.data.root_pos_w[env_ids, 0:1]  # [len(env_ids), 1]
+            self._stagnation_buffer[env_ids, :] = current_x.expand(-1, self._stagnation_buffer.shape[1])
 
 
         # --- Immediately sample a new command at episode start ---
