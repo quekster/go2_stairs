@@ -199,8 +199,8 @@ def energy_penalty(env):
 
 def foot_clearance_reward(
     env,
-    desired_clearance: float = 0.20,
-    safety_margin: float = 0.10,
+    desired_clearance: float = 0.10,
+    safety_margin: float = 0.05,
     channels=None
 ) -> torch.Tensor:
     """
