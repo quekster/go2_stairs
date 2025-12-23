@@ -12,7 +12,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfInvertedPyramidStairsTerrainCfg, MeshInvertedPyramidStairsTerrainCfg, MeshPyramidStairsTerrainCfg
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
-
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
 
@@ -49,7 +48,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         #terrain_type="generator",
         #terrain_generator=terrain_gen,
         terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_10_colour.usdz",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm.usdz",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_10_colour.usdz",
         # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/icra_map_flat_new.usdz",
         
         physics_material=sim_utils.RigidBodyMaterialCfg(

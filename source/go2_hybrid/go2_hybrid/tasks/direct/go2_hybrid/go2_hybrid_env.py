@@ -32,8 +32,8 @@ class Go2HybridEnv(DirectRLEnv):
     def __init__(self, cfg: Go2HybridEnvCfg, render_mode: str | None = None, **kwargs):
         
         #mid and end point positions
-        self.end_point_pos = 3.0   
-        self.mid_point_pos = 0.4        
+        self.end_point_pos = 18.0   
+        # self.mid_point_pos = 0.4        
         
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -196,16 +196,16 @@ class Go2HybridEnv(DirectRLEnv):
         )
 
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
-        translations = torch.tensor([[self.end_point_pos, 0.0, 0.05]], dtype=torch.float32)  # shape (1,3)
+        translations = torch.tensor([[self.end_point_pos, 0.0, 10.5]], dtype=torch.float32)  # shape (1,3)
         _end_point_marker.visualize(translations=translations)
 
-        _mid_point_marker = VisualizationMarkers(_mid_point_marker_cfg)
-        translations = torch.tensor([[self.mid_point_pos, 0.0, 0.8]], dtype=torch.float32)  # shape (1,3)
-        _mid_point_marker.visualize(translations=translations)
+        # _mid_point_marker = VisualizationMarkers(_mid_point_marker_cfg)
+        # translations = torch.tensor([[self.mid_point_pos, 0.0, 0.8]], dtype=torch.float32)  # shape (1,3)
+        # _mid_point_marker.visualize(translations=translations)
 
-        _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
-        translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
-        _origin_debug_marker.visualize(translations=translations)
+        # _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
+        # translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
+        # _origin_debug_marker.visualize(translations=translations)
 
         self._lidar_origin_debug_marker = VisualizationMarkers(_lidar_origin_debug_marker_cfg)
         self._lidar_origin_marker_type = list(_lidar_origin_debug_marker_cfg.markers.keys())  # ['lidar_origin_box']
@@ -327,11 +327,11 @@ class Go2HybridEnv(DirectRLEnv):
         flipped = flipped_over(self, threshold=-0.2)
         stuck_term = stuck(self)
 
-        # end_term = end_point_termination(self)
-        mid_term = mid_point_termination(self)
+        end_term = end_point_termination(self)
+        # mid_term = mid_point_termination(self)
 
         # --- Combine ---
-        terminated = base_contact | oob | flipped | stuck_term | mid_term
+        terminated = base_contact | oob | flipped | stuck_term | end_term
 
         return terminated, time_outs
 
