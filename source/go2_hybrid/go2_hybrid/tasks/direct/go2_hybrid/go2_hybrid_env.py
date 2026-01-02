@@ -23,7 +23,7 @@ import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
 from .rewards import compute_all_rewards
-from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination, mid_point_termination
+from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
     
@@ -31,15 +31,24 @@ class Go2HybridEnv(DirectRLEnv):
 
     def __init__(self, cfg: Go2HybridEnvCfg, render_mode: str | None = None, **kwargs):
         
-        #mid and end point positions
-        self.end_point_pos = 18.0   
-        # self.mid_point_pos = 0.4        
+        #end point positions for various maps
+        self.end_point_pos = 18.0 #ascending stairs / descending stairs
+        # self.end_point_pos = 16.5   #icra map
+
+        #robot spawn offsets
+        self._base_x_offset = 2.5 # ascending 100s
+        self._base_z_offset = 0.4 # ascending 100s
+
+        # self._base_x_offset = 0.0 # descending 100s
+        # self._base_z_offset = 11.0 # descending 100s
+
+        # self._base_x_offset = -1.0 #icramap
+        # self._base_z_offset = 0.55 #icramap       
         
         super().__init__(cfg, render_mode, **kwargs)
 
         self._step_counter =0
         self._marker= None
-        
         self._lidar_range = 70.0  # metres
 
 
@@ -63,15 +72,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._prev_root_x = torch.zeros(self.num_envs, device=self.device)
 
 
-        #robot spawn offsets
-        self._base_x_offset = 2.5
-        self._base_z_offset = 0.4
-        # self._base_x_offset = -1.0
-        # self._base_z_offset = 0.55
 
-   
-
-        
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
@@ -98,7 +99,7 @@ class Go2HybridEnv(DirectRLEnv):
                 "foot_lateral_separation_penalty",
                 "forward_progress",
                 "rear_match_front",
-                # "hip_deflection_l2",
+                "hip_deflection_l2",
                 "track_center_path",
             ]
         }
@@ -196,12 +197,11 @@ class Go2HybridEnv(DirectRLEnv):
         )
 
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
-        translations = torch.tensor([[self.end_point_pos, 0.0, 10.5]], dtype=torch.float32)  # shape (1,3)
+        translations = torch.tensor([[self.end_point_pos, 0.0, 10.5]], dtype=torch.float32)  # ascending stairs, shape (1,3)
+        # translations = torch.tensor([[self.end_point_pos, 0.0, -10.5]], dtype=torch.float32)  # descending stairs, shape (1,3)
+        # translations = torch.tensor([[self.end_point_pos, 0.0, 0.5]], dtype=torch.float32)  # icra map
         _end_point_marker.visualize(translations=translations)
 
-        # _mid_point_marker = VisualizationMarkers(_mid_point_marker_cfg)
-        # translations = torch.tensor([[self.mid_point_pos, 0.0, 0.8]], dtype=torch.float32)  # shape (1,3)
-        # _mid_point_marker.visualize(translations=translations)
 
         # _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         # translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
@@ -326,9 +326,7 @@ class Go2HybridEnv(DirectRLEnv):
         oob = out_of_bounds(self, margin=0.5)
         flipped = flipped_over(self, threshold=-0.2)
         stuck_term = stuck(self)
-
         end_term = end_point_termination(self)
-        # mid_term = mid_point_termination(self)
 
         # --- Combine ---
         terminated = base_contact | oob | flipped | stuck_term | end_term

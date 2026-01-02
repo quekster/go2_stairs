@@ -8,6 +8,8 @@ from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 import isaaclab.sim as sim_utils
+from isaaclab.utils.noise import NoiseModelCfg, GaussianNoiseCfg
+
 
 from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfInvertedPyramidStairsTerrainCfg, MeshInvertedPyramidStairsTerrainCfg, MeshPyramidStairsTerrainCfg
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
@@ -43,12 +45,22 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         num_envs=200, env_spacing=0.0, replicate_physics=True
     )
 
+    # Action noise (applied to the raw [-1, 1] actions coming from the policy)
+    action_noise_model = NoiseModelCfg(
+        noise_cfg=GaussianNoiseCfg(
+            mean=0.0,
+            std=0.20,          
+            operation="add",
+        )
+    )
+
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
         #terrain_type="generator",
         #terrain_generator=terrain_gen,
         terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm.usdz",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm_ascending.usdz",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm_descending.usdz",
         # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/double_stairs_10_colour.usdz",
         # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/icra_map_flat_new.usdz",
         

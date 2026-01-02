@@ -604,7 +604,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "rear_match_front": rear_match_front(env, pos_weight=1.0, vel_thresh=0.05, offset_forward=0.0),
         "stagnation_penalty": stagnation_penalty(env),
         "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
-        # "hip_deflection_l2": hip_deflection_l2(env),
+        "hip_deflection_l2": hip_deflection_l2(env),
         "track_center_path": track_center_path(env),
 
     }
@@ -626,7 +626,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_clearance_reward": 2.5,
         "joint_pos_limit": -0.6,
         "smoothness_penalty": -0.01,
-        "base_height_l2_lidar": -0.5,
+        "base_height_l2_lidar": -1.0,
         "foot_vertical_accel_reward": 1.4,
         "backward_vel_penalty": -4.0,
         "feet_air_time_rear": 2.0,
@@ -634,8 +634,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "forward_progress": 5.0,
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
-        # "hip_deflection_l2": -1.0,
-        "track_center_path": 1.0,
+        "hip_deflection_l2": -1.0,
+        "track_center_path": 2.0,
     }
 
     dt = env.step_dt
