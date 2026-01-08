@@ -197,8 +197,8 @@ class Go2HybridEnv(DirectRLEnv):
         )
 
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
-        translations = torch.tensor([[self.end_point_pos, 0.0, 10.5]], dtype=torch.float32)  # ascending stairs, shape (1,3)
-        # translations = torch.tensor([[self.end_point_pos, 0.0, -10.5]], dtype=torch.float32)  # descending stairs, shape (1,3)
+        # translations = torch.tensor([[self.end_point_pos, 0.0, 10.5]], dtype=torch.float32)  # ascending stairs, shape (1,3)
+        translations = torch.tensor([[self.end_point_pos, 0.0, -10.5]], dtype=torch.float32)  # descending stairs, shape (1,3)
         # translations = torch.tensor([[self.end_point_pos, 0.0, 0.5]], dtype=torch.float32)  # icra map
         _end_point_marker.visualize(translations=translations)
 

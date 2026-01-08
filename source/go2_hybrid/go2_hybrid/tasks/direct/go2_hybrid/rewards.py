@@ -248,30 +248,6 @@ def foot_clearance_reward(
     clearance = foot_z_b - terrain_height_b.unsqueeze(1)           # [N, 4]
 
 
-    # -------------------------------------------------------------
-    # 5) Clearance error: want clearance ≥ desired_clearance
-    # -------------------------------------------------------------
-    # clearance_error = desired_clearance - clearance                # [N, 4]
-    # clearance_penalty = torch.square(clearance_error)
-
-    # # -------------------------------------------------------------
-    # # 6) Weight penalty by swing activity (stance legs ignored)
-    # # -------------------------------------------------------------
-    # foot_vel_xy = torch.norm(
-    #     env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2
-    # )   # [N, 4]
-
-    # swing_weight = torch.tanh(2.0 * foot_vel_xy)                  # smooth gating
-
-    # weighted_penalty = clearance_penalty * swing_weight           # [N, 4]
-
-
-    # # -------------------------------------------------------------
-    # # 7) Sum over 4 legs
-    # # -------------------------------------------------------------
-    # reward = torch.sum(weighted_penalty, dim=1)                    # [N]
-
-    #testing new:
     per_foot_reward = torch.clamp(clearance, min=0.0, max=desired_clearance)
     reward = torch.sum(per_foot_reward, dim=1)
 
@@ -289,7 +265,6 @@ def foot_vertical_accel_reward(env, scale=0.5):
     vel_now = env._robot.data.body_lin_vel_w[:, env._feet_ids, 2]   # [N,4]
 
     # Previous step vertical velocity
-    # IMPORTANT: if your env does not store this, I can show you how to add it.
     vel_prev = env._robot.data.prev_body_lin_vel_w[:, env._feet_ids, 2]  # [N,4]
 
     # Vertical acceleration (finite difference)
@@ -619,7 +594,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_torque_penalty": -2.0e-5,
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
-        "undesired_contacts": -1.0,
+        "undesired_contacts": -4.0,
         "flat_orientation": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
@@ -631,11 +606,11 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "backward_vel_penalty": -4.0,
         "feet_air_time_rear": 2.0,
         "stagnation_penalty": -3.0,
-        "forward_progress": 5.0,
+        "forward_progress": 2.0,
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
         "hip_deflection_l2": -1.0,
-        "track_center_path": 2.0,
+        "track_center_path": 1.0,
     }
 
     dt = env.step_dt
