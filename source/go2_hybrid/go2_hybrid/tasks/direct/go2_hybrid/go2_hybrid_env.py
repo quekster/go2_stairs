@@ -36,14 +36,14 @@ class Go2HybridEnv(DirectRLEnv):
         # self.end_point_pos = 16.5   #icra map
 
         # #robot spawn offsets
-        # self._base_x_offset = 2.5 # ascending 100s
-        # self._base_z_offset = 0.4 # ascending 100s
+        self._base_x_offset = 2.5 # ascending 100s
+        self._base_z_offset = 0.4 # ascending 100s
 
         # self._base_x_offset = 0.0 # descending 100s
         # self._base_z_offset = 10.5 # descending 100s
 
-        self._base_x_offset = -1.0 #icramap
-        self._base_z_offset = 0.55 #icramap       
+        # self._base_x_offset = -1.0 #icramap
+        # self._base_z_offset = 0.55 #icramap       
         
         super().__init__(cfg, render_mode, **kwargs)
 
