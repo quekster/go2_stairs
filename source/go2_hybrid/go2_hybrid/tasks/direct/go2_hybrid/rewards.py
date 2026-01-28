@@ -201,8 +201,9 @@ def foot_clearance_reward(
     env,
     desired_clearance: float = 0.10,
     safety_margin: float = 0.05,
+    radius: float = 0.12,
     channels=None
-) -> torch.Tensor:
+    ) -> torch.Tensor:
     """
     Encourage each swinging foot to clear the terrain height predicted by LiDAR.
     Uses BASE FRAME for all height computations.
@@ -211,8 +212,11 @@ def foot_clearance_reward(
     # -------------------------------------------------------------
     # 1) Terrain height from LiDAR (in base frame)
     # -------------------------------------------------------------
-    terrain_height_b = get_height_lidar(env, channel=0)   # [N]
+    # terrain_height_b = get_height_lidar(env, channel=0)   # [N]
+    # terrain_height_b = terrain_height_b + safety_margin           # lift terrain a bit
+    terrain_height_b = feet_height_scanner(env, radius=radius)   # [N]
     terrain_height_b = terrain_height_b + safety_margin           # lift terrain a bit
+    terrain_height_b = torch.nan_to_num(terrain_height_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
     # -------------------------------------------------------------
@@ -223,7 +227,6 @@ def foot_clearance_reward(
 
     # -------------------------------------------------------------
     # 3) Convert foot positions WORLD → BASE frame
-    #     (using the SAME CORRECT METHOD as your LiDAR conversion)
     # -------------------------------------------------------------
     base_pos_w  = env._robot.data.root_pos_w                       # [N, 3]
     base_quat_w = env._robot.data.root_quat_w                      # [N, 4]
@@ -245,7 +248,7 @@ def foot_clearance_reward(
     # 4) Compute clearance relative to terrain height
     # -------------------------------------------------------------
     # clearance_i = foot_z - terrain_z
-    clearance = foot_z_b - terrain_height_b.unsqueeze(1)           # [N, 4]
+    clearance = foot_z_b - terrain_height_b          # [N, 4]
 
 
     per_foot_reward = torch.clamp(clearance, min=0.0, max=desired_clearance)
@@ -552,6 +555,53 @@ def track_center_path(env, std: float = 0.15) -> torch.Tensor:
 
     return reward
 
+def rear_swing_pitch(
+    env,
+    pitch_sin_thresh: float = 0.17,   # ~10 deg: sin(10°)=0.173
+    min_cmd_x: float = 0.10,
+    force_thresh: float = 5.0,
+    vz_min: float = 0.05,             # ignore tiny noise
+    vz_cap: float = 0.50,             # cap to prevent “kick” exploitation
+) -> torch.Tensor:
+    """
+    Reward rear-foot swing (no contact + upward foot velocity) when the base is pitching forward.
+
+    Pitch detection uses gravity in base frame:
+      g_b = R^T * [0,0,-1], and forward pitch typically increases g_b.x in x-forward frames.
+    If you find the sign is inverted in your setup, flip the inequality on g_b[:,0].
+    """
+
+    # ---------- condition: pitching forward ----------
+    q_w = env._robot.data.root_quat_w  # [N,4]
+    g_w = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(env.num_envs, 3)  # [N,3]
+    g_b = quat_apply(quat_conjugate(q_w), g_w)  # [N,3]
+
+    pitching_fwd = (g_b[:, 0] > pitch_sin_thresh).float()  # if sign wrong, use < -pitch_sin_thresh
+
+    # Gate to only matter when commanded forward motion exists
+    moving_fwd = (env._commands[:, 0] > min_cmd_x).float()
+    cond = pitching_fwd * moving_fwd  # [N]
+
+    # ---------- rear swing mask ----------
+    forces = env._contact_sensor.data.net_forces_w[:, env._feet_ids, :]  # [N,4,3]
+    contact = (forces.norm(dim=-1) > force_thresh)  # [N,4]
+    rear_swing = (~contact)[:, 2:].float()          # [N,2] (RL, RR)
+
+    # ---------- rear foot upward velocity in base frame ----------
+    foot_vel_w = env._robot.data.body_lin_vel_w[:, env._feet_ids, :]     # [N,4,3]
+    base_vel_w = env._robot.data.root_lin_vel_w.unsqueeze(1)             # [N,1,3]
+    rel_vel_w = foot_vel_w - base_vel_w                                  # [N,4,3]
+
+    q_inv = quat_conjugate(q_w).unsqueeze(1).expand(-1, rel_vel_w.shape[1], -1)  # [N,4,4]
+    rel_vel_b = quat_apply(q_inv, rel_vel_w)                                     # [N,4,3]
+
+    rear_vz = rel_vel_b[:, 2:, 2]  # [N,2]
+    vz_shaped = torch.clamp(rear_vz - vz_min, min=0.0, max=vz_cap)  # only reward upward swing
+
+    # ---------- final reward ----------
+    r = torch.sum(vz_shaped * rear_swing, dim=1) * cond  # [N]
+    return r
+
 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -565,7 +615,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": joint_acc_penalty(env),
         "action_rate_penalty": action_rate_penalty(env),
         "undesired_contacts": undesired_contacts(env),
-        "flat_orientation": flat_orientation_roll(env),
+        "flat_orientation": flat_orientation(env),
+        "flat_orientation_roll": flat_orientation_roll(env),
         "joint_pos_limit": joint_pos_limits(env),  # <-- NEW
         "energy_penalty": energy_penalty(env),
         "feet_slide_penalty": feet_slide(env),
@@ -581,6 +632,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
         "hip_deflection_l2": hip_deflection_l2(env),
         "track_center_path": track_center_path(env),
+        "rear_swing_pitch": rear_swing_pitch(env),
 
     }
 
@@ -595,7 +647,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
         "undesired_contacts": -4.0,
-        "flat_orientation": -2.0,
+        "flat_orientation": -0.3, 
+        "flat_orientation_roll": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
         "foot_clearance_reward": 2.5,
@@ -610,7 +663,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
         "hip_deflection_l2": -1.0,
-        "track_center_path": 1.0,
+        "track_center_path": 2.0,
+        "rear_swing_pitch": 2.0
     }
 
     dt = env.step_dt
@@ -717,3 +771,53 @@ def get_pitch_from_quat(quat: torch.Tensor) -> torch.Tensor:
     pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
 
     return pitch
+
+def feet_height_scanner(env, radius: float = 0.12,) -> torch.Tensor:
+    """Estimate terrain height under each foot using privileged height-scanner hits.
+
+    Returns:
+        terrain_z_b: [N, 4] terrain height under each foot, expressed in BASE frame (z).
+    """
+    # Height scanner hits in WORLD frame: [N, R, 3]
+    hits_w = env._height_scanner.data.ray_hits_w
+
+    # Convert hits to BASE frame
+    base_pos_w = env._robot.data.root_pos_w                     # [N,3]
+    base_quat_w = env._robot.data.root_quat_w                   # [N,4]
+    base_quat_inv = quat_conjugate(base_quat_w)                 # [N,4]
+
+    hits_shifted = hits_w - base_pos_w.unsqueeze(1)             # [N,R,3]
+    q_exp = base_quat_inv.unsqueeze(1).expand(-1, hits_shifted.shape[1], -1)  # [N,R,4]
+    hits_b = quat_apply(q_exp, hits_shifted)                    # [N,R,3]
+
+    hits_xy = hits_b[..., :2]                                   # [N,R,2]
+    hits_z  = hits_b[...,  2]                                   # [N,R]
+
+    # Foot positions in BASE frame
+    foot_pos_w = env._robot.data.body_pos_w[:, env._feet_ids, :] # [N,4,3]
+    foot_shifted = foot_pos_w - base_pos_w.unsqueeze(1)          # [N,4,3]
+    qf_exp = base_quat_inv.unsqueeze(1).expand(-1, foot_shifted.shape[1], -1)  # [N,4,4]
+    foot_b = quat_apply(qf_exp, foot_shifted)                    # [N,4,3]
+    foot_xy = foot_b[..., :2]                                    # [N,4,2]
+
+    # Build a neighborhood mask: rays whose XY are within `radius` of each foot XY
+    # dist2: [N,4,R]
+    diff = hits_xy.unsqueeze(1) - foot_xy.unsqueeze(2)           # [N,4,R,2]
+    dist2 = (diff ** 2).sum(dim=-1)                              # [N,4,R]
+    near = dist2 <= (radius * radius)                            # [N,4,R]
+
+    # Valid hit mask (finite z)
+    valid = torch.isfinite(hits_z).unsqueeze(1)                  # [N,1,R]
+    mask = near & valid                                          # [N,4,R]
+
+    # Median z of nearby rays (robust); if none nearby, fall back to global median
+    nan = torch.tensor(float("nan"), device=hits_z.device, dtype=hits_z.dtype)
+    z_sel = torch.where(mask, hits_z.unsqueeze(1), nan)          # [N,4,R]
+    terrain_z_b = torch.nanmedian(z_sel, dim=2).values           # [N,4]
+
+    # Fallback for feet with no valid neighbors: global nanmedian over all rays
+    global_z = torch.nanmedian(hits_z, dim=1).values             # [N]
+    no_data = ~torch.isfinite(terrain_z_b)                       # [N,4]
+    terrain_z_b = torch.where(no_data, global_z.unsqueeze(1), terrain_z_b)
+
+    return terrain_z_b

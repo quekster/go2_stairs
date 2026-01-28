@@ -35,15 +35,15 @@ class Go2HybridEnv(DirectRLEnv):
         self.end_point_pos = 18.0 #ascending stairs / descending stairs
         # self.end_point_pos = 16.5   #icra map
 
-        #robot spawn offsets
-        self._base_x_offset = 2.5 # ascending 100s
-        self._base_z_offset = 0.4 # ascending 100s
+        # #robot spawn offsets
+        # self._base_x_offset = 2.5 # ascending 100s
+        # self._base_z_offset = 0.4 # ascending 100s
 
         # self._base_x_offset = 0.0 # descending 100s
-        # self._base_z_offset = 11.0 # descending 100s
+        # self._base_z_offset = 10.5 # descending 100s
 
-        # self._base_x_offset = -1.0 #icramap
-        # self._base_z_offset = 0.55 #icramap       
+        self._base_x_offset = -1.0 #icramap
+        self._base_z_offset = 0.55 #icramap       
         
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -86,6 +86,7 @@ class Go2HybridEnv(DirectRLEnv):
                 "action_rate_penalty",
                 "undesired_contacts",
                 "flat_orientation",
+                "flat_orientation_roll",
                 "energy_penalty",
                 "feet_slide_penalty",
                 "foot_clearance_reward",
@@ -101,6 +102,7 @@ class Go2HybridEnv(DirectRLEnv):
                 "rear_match_front",
                 "hip_deflection_l2",
                 "track_center_path",
+                "rear_swing_pitch"
             ]
         }
 
