@@ -1,0 +1,276 @@
+# rewards.py
+import torch
+from typing import Dict, Tuple
+import math
+
+def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
+    """Reward tracking of commanded linear velocity (x,y) in body frame."""
+    cmd_body = get_heading_rotated_commands(env)
+    lin_vel_err = torch.sum(torch.square(cmd_body[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
+    return torch.exp(-lin_vel_err / std2)
+
+def track_ang_vel_z_exp(env, std2: float = 0.25) -> torch.Tensor:
+    """Reward tracking of commanded yaw rate."""
+    err = torch.square(env._commands[:, 2] - env._robot.data.root_ang_vel_b[:, 2])
+    return torch.exp(-err / std2)
+
+def track_heading_reward(env, std2: float = 0.5) -> torch.Tensor:
+    """Reward facing toward commanded heading angle."""
+    # Get robot yaw from its quaternion
+    quat = env._robot.data.root_quat_w
+    # yaw = atan2(2*(wz + xy), 1 - 2*(y^2 + z^2))
+    yaw = torch.atan2(
+        2.0 * (quat[:, 3] * quat[:, 2] + quat[:, 0] * quat[:, 1]),
+        1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2),
+    )
+    yaw_err = torch.square(torch.atan2(torch.sin(yaw - env._commands[:, 3]),
+                                       torch.cos(yaw - env._commands[:, 3])))
+    return torch.exp(-yaw_err / std2)
+
+
+def lin_vel_z_penalty(env) -> torch.Tensor:
+    return torch.square(env._robot.data.root_lin_vel_b[:, 2])
+
+def ang_vel_xy_penalty(env) -> torch.Tensor:
+    return torch.sum(torch.square(env._robot.data.root_ang_vel_b[:, :2]), dim=1)
+
+def joint_torque_penalty(env) -> torch.Tensor:
+    return torch.sum(torch.square(env._robot.data.applied_torque), dim=1)
+
+def joint_acc_penalty(env) -> torch.Tensor:
+    return torch.sum(torch.square(env._robot.data.joint_acc), dim=1)
+
+def action_rate_penalty(env) -> torch.Tensor:
+    delta = env._actions - env._previous_actions
+    return torch.sum(delta ** 2, dim=1) / env._actions.shape[1]
+
+def feet_air_time(env, threshold: float = 0.5, min_cmd_xy: float = 0.1) -> torch.Tensor:
+    """Encourage regular stepping by rewarding longer swing time upon touchdown."""
+    first_contact = env._contact_sensor.compute_first_contact(env.step_dt)[:, env._feet_ids]
+    last_air_time = env._contact_sensor.data.last_air_time[:, env._feet_ids]
+    r = torch.sum((last_air_time - threshold) * first_contact, dim=1)
+    moving = (torch.norm(env._commands[:, :2], dim=1) > min_cmd_xy)
+    return r * moving
+
+
+def feet_slide(env) -> torch.Tensor:
+    """Penalize foot sliding when in contact with the ground."""
+    contact = env._contact_sensor.data.net_forces_w_history.norm(dim=-1).max(dim=1)[0] > 1.0
+    foot_ids = env._feet_ids
+    foot_vel_xy = env._robot.data.body_lin_vel_w[:, foot_ids, :2]
+    return torch.sum(torch.norm(foot_vel_xy, dim=-1) * contact[:, foot_ids], dim=1)
+
+
+def undesired_contacts(env, threshold: float = 1.0) -> torch.Tensor:
+    f = env._contact_sensor.data.net_forces_w_history
+    is_contact = torch.max(torch.norm(f[:, :, env._undesired_contact_body_ids], dim=-1), dim=1)[0] > threshold
+    return torch.sum(is_contact, dim=1)
+
+def forward_progress(env) -> torch.Tensor:
+    """Encourage forward body velocity in x (in body frame)."""
+    return env._robot.data.root_lin_vel_b[:, 0].clip(min=0.0)
+
+def flat_orientation(env) -> torch.Tensor:
+    """Penalize non-flat base orientation using L2 squared kernel."""
+    result = torch.sum(torch.square(env._robot.data.projected_gravity_b[:, :2]), dim=1)
+    return result
+
+def joint_pos_limits(env) -> torch.Tensor:
+    """Penalize joint positions outside soft limits."""
+    lower_limits = env._robot.data.soft_joint_pos_limits[:,:,0]
+    upper_limits = env._robot.data.soft_joint_pos_limits[:,:,1]
+    joint_pos = env._robot.data.joint_pos
+
+    below_lower = (lower_limits - joint_pos).clamp(min=0.0)
+    above_upper = (joint_pos - upper_limits).clamp(min=0.0)
+
+    out_of_limits = below_lower + above_upper
+    return torch.sum(out_of_limits, dim=1)
+
+def energy_penalty(env):
+    """ Controlling the Solo12 quadruped robot with deep reinforcement learning https://www.nature.com/articles/s41598-023-38259-7""" 
+    # approximate energy consumption
+    torque = env._robot.data.applied_torque
+    joint_vel = env._robot.data.joint_vel
+    return torch.sum(torch.abs(torque * joint_vel), dim=1)
+
+def base_height_penalty(env, target: float = 0.30, std: float = 0.05) -> torch.Tensor:
+    """
+    Penalize deviation of the robot's base height from a terrain-relative target height.
+
+    To maintain a stable target above whatever terrain the height_scanner detects.
+    """
+    base_z = env._robot.data.root_pos_w[:, 2]
+    height_hits_z = env._height_scanner.data.ray_hits_w[..., 2]
+    terrain_z = torch.mean(torch.nan_to_num(height_hits_z,nan=2.0, posinf=2.0, neginf=-2.0), dim=1)
+    adjusted_target_z = terrain_z + target
+    err_sq = torch.square(base_z - adjusted_target_z)
+    return err_sq
+
+
+def foot_clearance_reward(env, desired_clearance: float = 0.20, safety_margin: float = 0.05, std: float = 0.05, thigh_gain: float = 1.5) -> torch.Tensor:
+    terrain_hits = env._height_scanner.data.ray_hits_w[..., 2] + safety_margin  # (N, R)
+    terrain_height = torch.mean(torch.nan_to_num(terrain_hits, nan=2.0), dim=1) # (N,)
+    foot_z = env._robot.data.body_pos_w[:, env._feet_ids, 2]
+    clearance = foot_z - terrain_height.unsqueeze(1)
+    clearance_penalty = torch.square(desired_clearance - clearance)
+    foot_vel_xy = torch.norm(env._robot.data.body_lin_vel_w[:, env._feet_ids, :2], dim=2)   # [N, 4]
+    swing_weight = torch.tanh(2.0 * foot_vel_xy)
+
+    #trying something with thigh
+    thigh_pos = env._robot.data.joint_pos[:, 4:8]         # (N,4)
+    # Only positive rotation counts as upward lift
+    thigh_lift = torch.relu(thigh_pos)                    # (N,4)
+    thigh_weight = torch.tanh(thigh_gain * thigh_lift)
+    combined_weight = swing_weight * (0.2 + 0.8 * thigh_weight)
+    weight_penalty = clearance_penalty * combined_weight
+    #----------
+
+    # weight_penalty = clearance_penalty * swing_weight
+    total_error= torch.sum(weight_penalty, dim=1)
+    reward = torch.exp(-total_error / (2 * std **2))
+
+    return reward
+
+
+
+def stand_still_joint_deviation_l1(env, command_threshold: float = 0.06) -> torch.Tensor:
+    """Penalize offsets from the default joint positions when the command is very small."""
+    commands = env._commands # [num_envs, 4]: [vx, vy, yaw_rate, heading]
+    joint_dev = torch.sum(torch.abs(env._robot.data.joint_pos - env._robot.data.default_joint_pos), dim=1) # L1 deviation per environment (sum over all joints)
+    cmd_mag = torch.norm(commands[:, :2], dim=1) # magnitude of (vx, vy) command
+    return joint_dev * (cmd_mag < command_threshold)
+
+from isaaclab.utils.math import quat_apply, quat_conjugate
+
+from isaaclab.utils.math import quat_apply, quat_conjugate
+
+def foot_lateral_separation_penalty(env,
+                                    min_dist=0.29,
+                                    max_dist=0.30,
+                                    scale=1.0):
+    """
+    Penalize lateral foot spacing when outside a desired range.
+    - No penalty if spacing in [min_dist, max_dist]
+    - Penalty grows quadratically once outside the band.
+    """
+
+    # 1) Foot positions in WORLD frame
+    feet_w = env._robot.data.body_pos_w[:, env._feet_ids, :]    # [N,4,3]
+
+    # 2) Base pose in WORLD frame
+    base_pos_w  = env._robot.data.root_pos_w                    # [N,3]
+    base_quat_w = env._robot.data.root_quat_w                   # [N,4]
+    base_quat_inv = quat_conjugate(base_quat_w)
+
+    # 3) Shift to base origin
+    shifted = feet_w - base_pos_w.unsqueeze(1)
+    base_quat_exp = base_quat_inv.unsqueeze(1).expand(-1, 4, -1)
+
+    # 4) Rotate into base frame
+    feet_b = quat_apply(base_quat_exp, shifted)                 # [N,4,3]
+
+    # Foot order: [FL, FR, RL, RR]
+    FL, FR, RL, RR = feet_b[:, 0], feet_b[:, 1], feet_b[:, 2], feet_b[:, 3]
+
+    # 5) L/R spacing = |y_left - y_right|
+    front_lr = torch.abs(FL[:, 1] - FR[:, 1])
+    rear_lr  = torch.abs(RL[:, 1] - RR[:, 1])
+
+    # 6) Penalty only if outside the acceptable spacing range
+    # amount by which spacing is too small
+    too_small_front = torch.clamp(min_dist - front_lr, min=0.0)
+    too_small_rear  = torch.clamp(min_dist - rear_lr,  min=0.0)
+
+    # amount by which spacing is too wide
+    too_big_front = torch.clamp(front_lr - max_dist, min=0.0)
+    too_big_rear  = torch.clamp(rear_lr  - max_dist, min=0.0)
+
+    # Squared error outside the band
+    penalty_front = (too_small_front.pow(2) + too_big_front.pow(2))
+    penalty_rear  = (too_small_rear.pow(2)  + too_big_rear.pow(2))
+
+    # Pure penalty (negative)
+    penalty = -scale * (penalty_front + penalty_rear)
+
+    return penalty
+
+
+
+
+def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    raw: Dict[str, torch.Tensor] = {
+        "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
+        "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
+        "lin_vel_z_penalty": lin_vel_z_penalty(env),
+        "ang_vel_xy_penalty": ang_vel_xy_penalty(env),
+        "joint_torque_penalty": joint_torque_penalty(env),
+        "joint_acc_penalty": joint_acc_penalty(env),
+        "action_rate_penalty": action_rate_penalty(env),
+        "feet_air_time": feet_air_time(env),
+        "undesired_contacts": undesired_contacts(env),
+        # "forward_progress": forward_progress(env),
+        "flat_orientation": flat_orientation(env),
+        "joint_pos_limit": joint_pos_limits(env),  # <-- NEW
+        # "energy_penalty": energy_penalty(env),
+        "feet_slide_penalty": feet_slide(env),
+        "base_height_penalty": base_height_penalty(env),
+        "foot_clearance_reward": foot_clearance_reward(env),
+        "track_heading_reward": track_heading_reward(env),
+        "stand_still_joint_deviation_l1": stand_still_joint_deviation_l1(env),
+        "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
+    }
+
+    # --- Scales: tuned for flat-ground learning ---
+    w = {
+        "track_lin_vel_xy_exp": 3.0, #increased from 2.0
+        "track_ang_vel_z_exp": 0.7,
+        # "forward_progress": 0.5,
+        "ang_vel_xy_penalty": -0.05,
+        "joint_torque_penalty": -2.0e-5,
+        "joint_acc_penalty": -2.0e-7,
+        "action_rate_penalty": -0.5,
+        "feet_air_time": 0.6, #increased from 0.4
+        "undesired_contacts": -1.0,
+        "flat_orientation": -1.0, #decreased from -4.0
+        "lin_vel_z_penalty": -2.0,
+        # "energy_penalty": -1.0e-6,
+        "feet_slide_penalty": -0.1,
+        "base_height_penalty": -4.0, #increased from -6.5
+        "foot_clearance_reward": 0.5,
+        "track_heading_reward": 0.1,
+        "joint_pos_limit": -0.5,
+        "stand_still_joint_deviation_l1": -0.4,
+        "foot_lateral_separation_penalty": -0.05,
+    }
+
+    
+
+    dt = env.step_dt
+    scaled: Dict[str, torch.Tensor] = {}
+    for key, val in raw.items():
+        scaled[key] = val * w[key] * dt
+
+    total_reward = torch.sum(torch.stack(list(scaled.values())), dim=0)
+    return total_reward, scaled
+
+def get_heading_rotated_commands(env) -> torch.Tensor:
+    """
+    Rotate commanded (x, y) velocities from world-heading frame into body frame
+    using the commanded heading angle.
+    Returns tensor [num_envs, 3] (vx_body, vy_body, yaw_rate)
+    """
+    # commanded heading
+    heading = env._commands[:, 3]
+    cos_h = torch.cos(heading)
+    sin_h = torch.sin(heading)
+
+    vx = env._commands[:, 0]
+    vy = env._commands[:, 1]
+
+    # rotation from world heading to body frame
+    vx_rot = cos_h * vx + sin_h * vy
+    vy_rot = -sin_h * vx + cos_h * vy
+
+    yaw_rate = env._commands[:, 2]
+    return torch.stack((vx_rot, vy_rot, yaw_rate), dim=1)

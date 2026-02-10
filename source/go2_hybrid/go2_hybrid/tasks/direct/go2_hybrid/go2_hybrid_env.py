@@ -31,31 +31,22 @@ class Go2HybridEnv(DirectRLEnv):
 
     def __init__(self, cfg: Go2HybridEnvCfg, render_mode: str | None = None, **kwargs):
         
-        #end point positions for various maps
-        self.end_point_pos = 18.0 #ascending stairs / descending stairs
-        # self.end_point_pos = 16.5   #icra map
+    
 
-        # #robot spawn offsets
-        self._base_x_offset = 2.5 # ascending 100s
-        self._base_z_offset = 0.4 # ascending 100s
-
-        # self._base_x_offset = 0.0 # descending 100s
-        # self._base_z_offset = 10.5 # descending 100s
-
-        # self._base_x_offset = -1.0 #icramap
-        # self._base_z_offset = 0.55 #icramap       
         
         super().__init__(cfg, render_mode, **kwargs)
 
         self._step_counter =0
         self._marker= None
-        self._lidar_range = 70.0  # metres
 
+        # Now cfg is attached to self
+        self.phase_id = int(self.cfg.phase_id)
+        
+        self._lidar_range = self.cfg.lidar_range
 
         # Timers for command resampling
         self._cmd_timer = torch.zeros(self.num_envs, device=self.device)
         self._cmd_interval = torch.full((self.num_envs,), 10.0, device=self.device)  # seconds
-
         self._stuck_counter = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
 
 
@@ -68,43 +59,9 @@ class Go2HybridEnv(DirectRLEnv):
 
         # X/Y linear velocity (body frame) + yaw rate commands
         self._commands = torch.zeros(self.num_envs, 4, device=self.device)
-
         self._prev_root_x = torch.zeros(self.num_envs, device=self.device)
 
-
-
-        self._episode_sums = {
-            key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in [
-                "track_lin_vel_xy_exp",
-                # "track_modified_vel_reward",
-                "track_ang_vel_z_exp",
-                "lin_vel_z_penalty",
-                "ang_vel_xy_penalty",
-                "joint_torque_penalty",
-                "joint_acc_penalty",
-                "action_rate_penalty",
-                "undesired_contacts",
-                "flat_orientation",
-                "flat_orientation_roll",
-                "energy_penalty",
-                "feet_slide_penalty",
-                "foot_clearance_reward",
-                "joint_pos_limit",
-                "smoothness_penalty",
-                "base_height_l2_lidar",
-                "foot_vertical_accel_reward",
-                "backward_vel_penalty",
-                "feet_air_time_rear",
-                "stagnation_penalty",
-                "foot_lateral_separation_penalty",
-                "forward_progress",
-                "rear_match_front",
-                "hip_deflection_l2",
-                "track_center_path",
-                "rear_swing_pitch"
-            ]
-        }
+        self._episode_sums = {}
 
         # base: if your base is named "base" (or try "trunk" as fallback)
         self._base_id, _ = self._contact_sensor.find_bodies("base")
@@ -112,8 +69,11 @@ class Go2HybridEnv(DirectRLEnv):
         # feet: explicit four feet
         self._feet_ids, _ = self._contact_sensor.find_bodies(['FL_foot','FR_foot', 'RL_foot', 'RR_foot'])
 
-        # thighs (undesired contacts): explicit four thighs
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower', 'FL_calf','FR_calf', 'RL_calf', 'RR_calf'])
+        if self.phase_id==0:
+            # thighs (undesired contacts): explicit four thighs
+            self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh'])
+        else:
+            self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower', 'FL_calf','FR_calf', 'RL_calf', 'RR_calf'])
 
 
 
@@ -199,9 +159,7 @@ class Go2HybridEnv(DirectRLEnv):
         )
 
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
-        # translations = torch.tensor([[self.end_point_pos, 0.0, 10.5]], dtype=torch.float32)  # ascending stairs, shape (1,3)
-        translations = torch.tensor([[self.end_point_pos, 0.0, -10.5]], dtype=torch.float32)  # descending stairs, shape (1,3)
-        # translations = torch.tensor([[self.end_point_pos, 0.0, 0.5]], dtype=torch.float32)  # icra map
+        translations = torch.tensor([[self.cfg.end_point_pos, 0.0, 0.5]], dtype=torch.float32)  # icra map
         _end_point_marker.visualize(translations=translations)
 
 
@@ -251,7 +209,6 @@ class Go2HybridEnv(DirectRLEnv):
 
         action_scale = getattr(self.cfg, "action_scale", 0.15)
         self._processed_actions = action_scale * self._actions + self._robot.data.default_joint_pos
-        
 
 
     def _apply_action(self):
@@ -296,16 +253,11 @@ class Go2HybridEnv(DirectRLEnv):
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
 
+        ###### Used for forward_progress_position
         # 1. Read current x position
         x_now = self._robot.data.root_pos_w[:, 0]
-
-        # 2. Compute dx BEFORE updating _prev_root_x
-        # dx = x_now - self._prev_root_x
-        # print("dx:", dx)
-
         # 3. Update _prev_root_x AFTER computing dx
         self._prev_root_x = x_now.clone()
-
 
         return {
             "policy": obs_policy,      # for actor network
@@ -314,6 +266,11 @@ class Go2HybridEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         total, terms = compute_all_rewards(self)
+        if not self._episode_sums:
+            self._episode_sums = {
+                key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+                for key in terms.keys()
+            }
         # accumulate episodic sums for logging (same keys as terms)
         for k, v in terms.items():
             self._episode_sums[k] += v
@@ -322,17 +279,24 @@ class Go2HybridEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute episode termination signals (orientation, contact, bounds, timeout)."""
 
-        # --- Individual terminations ---
+        # Constant termination terms across all curriculum phases:
         time_outs = time_out(self)
         base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
         oob = out_of_bounds(self, margin=0.5)
-        flipped = flipped_over(self, threshold=-0.2)
-        stuck_term = stuck(self)
-        end_term = end_point_termination(self)
 
-        # --- Combine ---
-        terminated = base_contact | oob | flipped | stuck_term | end_term
 
+        # Phase 0 (flat ground) only terminations:
+        if self.phase_id == 0:
+            # print("HERHEHREHRHERHEHEHR IN TERMINATIONS")
+            terminated = base_contact | oob 
+            
+
+        else: 
+            # Phases 1 to 4 termination:
+            flipped = flipped_over(self, threshold=-0.2)
+            stuck_term = stuck(self)
+            end_term = end_point_termination(self)
+            terminated = base_contact | oob | flipped | stuck_term | end_term
         return terminated, time_outs
 
 
@@ -353,12 +317,6 @@ class Go2HybridEnv(DirectRLEnv):
         self._previous_actions[env_ids] = 0.0
         self._previous_previous_actions[env_ids] = 0.0
 
-        # # sample new commands in [-1, 1] (same as AnymalC)
-        # self._commands[env_ids, 0] = torch.zeros_like(self._commands[env_ids, 0]).uniform_(-1.0, 1.0)  # vx
-        # self._commands[env_ids, 1] = torch.zeros_like(self._commands[env_ids, 1]).uniform_(-1.0, 1.0)  # vy
-        # self._commands[env_ids, 2] = torch.zeros_like(self._commands[env_ids, 2]).uniform_(-1.0, 1.0)  # yaw rate
-        # self._commands[env_ids, 3] = torch.zeros_like(self._commands[env_ids, 3]).uniform_(-math.pi, math.pi)  # heading
-
         # reset stuck counters
         self._stuck_counter[env_ids] = 0
 
@@ -372,9 +330,9 @@ class Go2HybridEnv(DirectRLEnv):
         base_origin = self._terrain.env_origins[env_ids].clone()
 
         # move a little backward from the first step (assuming stairs go +X)
-        base_origin[:, 0] -= self._base_x_offset
+        base_origin[:, 0] -= self.cfg.base_x_offset
         # lift robot slightly so it’s not intersecting the mesh
-        base_origin[:, 2] += self._base_z_offset
+        base_origin[:, 2] += self.cfg.base_z_offset
 
 
         # Add per-env origin if available (scene may expose env_origins)
@@ -395,13 +353,10 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
 
-        # # Reset new reward trackers (for forward_progress_position and stagnation_penalty)
-        # if hasattr(self, "_prev_base_x"):
-        #     self._prev_base_x[env_ids] = self._robot.data.root_pos_w[env_ids, 0].clone()
 
-        # Reset new reward trackers (for stagnation_penalty)
-        if hasattr(self, "_stagnation_buffer"):
-            # Fill the rolling buffer with current position so stagnation doesn't trigger immediately
+        # Phase-dependent reset for Phase 1–4 reward trackers
+        if self.phase_id != 0 and hasattr(self, "_stagnation_buffer"):
+            # Fill rolling buffer with current position so stagnation doesn't trigger immediately
             current_x = self._robot.data.root_pos_w[env_ids, 0:1]  # [len(env_ids), 1]
             self._stagnation_buffer[env_ids, :] = current_x.expand(-1, self._stagnation_buffer.shape[1])
 
@@ -428,20 +383,42 @@ class Go2HybridEnv(DirectRLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
 
-    def resample_commands(self, env_ids: torch.Tensor):   # only forward for Phase 1
-        """Phase 1: Forward speed + heading towards stairs only."""
+    def resample_commands(self, env_ids: torch.Tensor):
+        """Phase-dependent command resampling."""
         num_envs = len(env_ids)
 
-        # Face the stairs (assuming +x is straight towards them)
-        heading = torch.zeros(num_envs, device=self.device)
-        self._commands[env_ids, 3] = heading
+        # -------------------------
+        # Phase 0: Flat ground
+        # Random 2D velocity + heading + yaw rate
+        # -------------------------
+        if self.phase_id == 0:
+            heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
+            self._commands[env_ids, 3] = heading
 
-        # Forward speed only, modest range
-        speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
-        self._commands[env_ids, 0] = speed          # vx
-        self._commands[env_ids, 1] = 0.0            # vy
-        self._commands[env_ids, 2] = 0.0            # yaw rate
+            speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+            direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
 
+            vx_world = speed * torch.cos(heading + direction_offset)
+            vy_world = speed * torch.sin(heading + direction_offset)
+            yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+
+            self._commands[env_ids, 0] = vx_world
+            self._commands[env_ids, 1] = vy_world
+            self._commands[env_ids, 2] = yaw_rate
+            # print("HEREHREHREHRHERE IN COMMANDS")
+
+        else:
+            # -------------------------
+            # Phases 1–4: Stairs / ICRA
+            # Forward speed only, fixed heading
+            # -------------------------
+            heading = torch.zeros(num_envs, device=self.device)
+            self._commands[env_ids, 3] = heading
+
+            speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
+            self._commands[env_ids, 0] = speed
+            self._commands[env_ids, 1] = 0.0
+            self._commands[env_ids, 2] = 0.0
 
     def get_bf_hits(self, env_ids=None):
         """Return all LiDAR hits in BASE frame. Also replaces NaNs with max-range."""
