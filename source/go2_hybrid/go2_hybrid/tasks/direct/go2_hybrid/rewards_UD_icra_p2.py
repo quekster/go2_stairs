@@ -662,7 +662,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "forward_progress": 2.0,
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
-        "hip_deflection_l2": -1.0,
+        "hip_deflection_l2": -5.0,
         "track_center_path": 2.0,
         "rear_swing_pitch": 2.0
     }

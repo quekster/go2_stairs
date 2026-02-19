@@ -5,7 +5,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
-from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg, DelayedPDActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 import isaaclab.sim as sim_utils
 from isaaclab.utils.noise import NoiseModelCfg, GaussianNoiseCfg
@@ -29,7 +29,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_episode_length = int(episode_length_s / (dt * decimation))
 
     ###### Phase related configs ######
-    phase_id: int = 4 #manually change this for different curriculum phase
+    phase_id: int = 3 #manually change this for different curriculum phase
     end_point_pos: float = 0.0 #set in post __init__ below
     base_x_offset: float = 0.0
     base_z_offset: float = 0.0
@@ -117,14 +117,25 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         soft_joint_pos_limit_factor=0.9,
         actuators={
             
-            "base_legs": DCMotorCfg(
+            # "base_legs": DCMotorCfg(
+            #     joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+            #     effort_limit=23.5,
+            #     saturation_effort=23.5,
+            #     velocity_limit=30.0,
+            #     stiffness=25.0,
+            #     damping=0.5,
+            #     friction=0.0,
+            # ),
+            "base_legs": DelayedPDActuatorCfg(
                 joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
                 effort_limit=23.5,
-                saturation_effort=23.5,
+                # saturation_effort=23.5,
                 velocity_limit=30.0,
                 stiffness=25.0,
                 damping=0.5,
                 friction=0.0,
+                min_delay=0, #physics timesteps
+                max_delay=3, #physics timesteps (5ms)
             ),
         },
     )
@@ -150,7 +161,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         mesh_prim_paths=["/World/Terrain"],
         update_period=0.0,
         history_length=0,
-        debug_vis=False,
+        debug_vis=True,
     )
     
     height_scanner=RayCasterCfg(
@@ -159,7 +170,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         ray_alignment="base",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[0.6,0.4]),    
         mesh_prim_paths=["/World/Terrain"],
-        debug_vis=True,
+        debug_vis=False,
     )
 
     def __post_init__(self):

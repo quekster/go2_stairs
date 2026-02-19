@@ -64,7 +64,7 @@ PHASES: Dict[int, CurricumlumPhase] = {
         end_point_pos= 18.0,
         base_x_offset= 2.5, 
         base_z_offset= 0.4,
-        episode_length_s= 20.0,
+        episode_length_s= 100.0,
     ),
     4: CurricumlumPhase(
         phase_id=4,
