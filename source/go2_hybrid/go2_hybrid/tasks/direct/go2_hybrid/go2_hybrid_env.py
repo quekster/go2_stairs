@@ -227,8 +227,8 @@ class Go2HybridEnv(DirectRLEnv):
                 self._commands,                                   # (N,4) → cmd_vx, cmd_vy, cmd_yaw_rate, heading
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos, # (N,ndof) joint pos error
                 self._robot.data.joint_vel,                       # (N,ndof) joint velocities
-                self._actions,                                    # (N,ndof) previous actions
-                lidar_obs,                                        # (N, ...) lidar hits
+                self._actions,                                    # (N,12) previous actions
+                lidar_obs,                                        # (N, 135) lidar hits
             ],
             dim=-1,
         )
@@ -236,20 +236,23 @@ class Go2HybridEnv(DirectRLEnv):
         # Critic observations (privileged)
         privileged = torch.cat(
             [
-                obs_policy,
+                obs_policy, #(N, 184)
                 self._robot.data.root_pos_w,            # (N, 3)
                 self._robot.data.root_quat_w,           # (N, 4)
-                self._robot.data.applied_torque,        # (N, ndof)
-                self._contact_sensor.data.net_forces_w.reshape(self.num_envs, -1), # contacts
-                self._contact_sensor.data.last_air_time.reshape(self.num_envs, -1),
-                height_obs,                             # (N, num_rays)
+                self._robot.data.applied_torque,        # (N, 12)
+                self._contact_sensor.data.net_forces_w.reshape(self.num_envs, -1), #(N, 57)
+                self._contact_sensor.data.last_air_time.reshape(self.num_envs, -1), #(N, 19)
+                height_obs,                             # (N, 35)
             ],
             dim=-1,
         )
         self._step_counter += 1
 
 
-        #print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
+        # print("obs dim:", obs_policy.shape[-1], "state dim:", privileged.shape[-1])
+        # print("net_contact_forces_w dim:", self._contact_sensor.data.net_forces_w.reshape(self.num_envs, -1).shape, "last_air_time dim:",self._contact_sensor.data.last_air_time.reshape(self.num_envs, -1).shape)
+        # print("height_obs dim:", height_obs.shape, "lidar_obs dim:", lidar_obs.shape, "actions dim:", self._actions.shape, "commands dim:", self._commands.shape)
+        # print("lidar_obs[0] as list:", lidar_obs[0])
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
 
@@ -395,7 +398,7 @@ class Go2HybridEnv(DirectRLEnv):
             heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
             self._commands[env_ids, 3] = heading
 
-            speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+            speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
             direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
 
             vx_world = speed * torch.cos(heading + direction_offset)
@@ -407,6 +410,7 @@ class Go2HybridEnv(DirectRLEnv):
             self._commands[env_ids, 2] = yaw_rate
             # print("HEREHREHREHRHERE IN COMMANDS")
 
+
         else:
             # -------------------------
             # Phases 1–4: Stairs / ICRA
@@ -415,10 +419,15 @@ class Go2HybridEnv(DirectRLEnv):
             heading = torch.zeros(num_envs, device=self.device)
             self._commands[env_ids, 3] = heading
 
+            p_stop = 0.20  # 20% exact zero-speed commands
             speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
+
+            stop_mask = torch.rand(num_envs, device=self.device) < p_stop
+            speed[stop_mask] = 0.0
+
             self._commands[env_ids, 0] = speed
             self._commands[env_ids, 1] = 0.0
-            self._commands[env_ids, 2] = 0.0
+            self._commands[env_ids, 2] = 0.0    
 
     def get_bf_hits(self, env_ids=None):
         """Return all LiDAR hits in BASE frame. Also replaces NaNs with max-range."""

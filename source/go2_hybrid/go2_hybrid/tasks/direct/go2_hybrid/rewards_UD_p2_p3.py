@@ -647,14 +647,14 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
         "undesired_contacts": -4.0,
-        "flat_orientation": -0.3, 
+        "flat_orientation": -0.8, 
         "flat_orientation_roll": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
         "foot_clearance_reward": 2.5,
         "joint_pos_limit": -0.6,
         "smoothness_penalty": -0.01,
-        "base_height_l2_lidar": -1.0,
+        "base_height_l2_lidar": -2.0,
         "foot_vertical_accel_reward": 1.4,
         "backward_vel_penalty": -4.0,
         "feet_air_time_rear": 2.0,
@@ -664,7 +664,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_lateral_separation_penalty": -4.0,
         "hip_deflection_l2": -5.0,
         "track_center_path": 2.0,
-        "rear_swing_pitch": 2.0
+        "rear_swing_pitch": 2.0,
     }
 
     dt = env.step_dt

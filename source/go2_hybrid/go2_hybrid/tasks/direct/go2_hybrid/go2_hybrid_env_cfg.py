@@ -42,11 +42,11 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     #simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1.0 / 200.0,
+        dt=1.0 / 200.0, #physics timestep 
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
+            friction_combine_mode="average",
+            restitution_combine_mode="average",
             static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
@@ -75,10 +75,10 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         terrain_type="",
         usd_path="",        
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
+            friction_combine_mode="average",
+            restitution_combine_mode="average",
+            static_friction=0.8,
+            dynamic_friction=0.7,
             restitution=0.0,
         ),
         debug_vis=False,
@@ -123,7 +123,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             #     saturation_effort=23.5,
             #     velocity_limit=30.0,
             #     stiffness=25.0,
-            #     damping=0.5,
+            #     damping=0.5, 
             #     friction=0.0,
             # ),
             "base_legs": DelayedPDActuatorCfg(
@@ -159,7 +159,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             channels=5,
             vertical_fov_range= [-60,-20], horizontal_fov_range=[-45,45], horizontal_res=10.0        ),
         mesh_prim_paths=["/World/Terrain"],
-        update_period=0.0,
+        update_period = 1.0 / 5.5,
         history_length=0,
         debug_vis=True,
     )
