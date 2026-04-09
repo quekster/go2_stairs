@@ -5,10 +5,9 @@ import gymnasium as gym
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, AssetBase
+from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster
-from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.sensors import ContactSensor, RayCaster
 
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -79,8 +78,19 @@ class Go2HybridEnv(DirectRLEnv):
 
 
     def _setup_scene(self):
-        # Ground plane (flat)
-        #spawn_ground_plane("/World/ground", GroundPlaneCfg())
+        phase_id = int(self.cfg.phase_id)
+        self._ground_contact_sensor = None
+        ground_plane_cfg = getattr(self.cfg, "ground_plane", None)
+        has_ground_plane = ground_plane_cfg is not None and ground_plane_cfg.spawn is not None
+
+        # Spawn optional fallback ground plane configured in env cfg.
+        if has_ground_plane:
+            ground_plane_cfg.spawn.func(
+                ground_plane_cfg.prim_path,
+                ground_plane_cfg.spawn,
+                translation=ground_plane_cfg.init_state.pos,
+                orientation=ground_plane_cfg.init_state.rot,
+            )
 
         # Spawn robot from cfg
         self._robot = Articulation(self.cfg.robot_cfg)   # note: cfg attribute name is robot_cfg in your direct cfg
@@ -88,6 +98,11 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+
+        if phase_id == 4 and has_ground_plane and self.cfg.ground_contact_sensor_cfg is not None:
+            ground_contact_sensor_cfg = self.cfg.ground_contact_sensor_cfg
+            self._ground_contact_sensor = ContactSensor(ground_contact_sensor_cfg)
+            self.scene.sensors["ground_contact_sensor"] = self._ground_contact_sensor
 
         self._height_scanner=RayCaster(self.cfg.height_scanner)
         self.scene.sensors["height_scanner"]=self._height_scanner 
@@ -180,8 +195,8 @@ class Go2HybridEnv(DirectRLEnv):
         self.scene.clone_environments(copy_from_source=False)
 
         # CPU collision filtering (same as reference)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+        if self.device == "cpu" and has_ground_plane:
+            self.scene.filter_collisions(global_prim_paths=[ground_plane_cfg.prim_path])
 
         # Light
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -302,13 +317,12 @@ class Go2HybridEnv(DirectRLEnv):
             terminated = base_contact | oob | flipped | stuck_term | end_term
         return terminated, time_outs
 
-
-   
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
         self._robot.reset(env_ids)
+        # DirectRLEnv applies reset-mode EventManager terms here (including DR terms from cfg.events).
         super()._reset_idx(env_ids)
 
         if len(env_ids) == self.num_envs:
@@ -347,6 +361,18 @@ class Go2HybridEnv(DirectRLEnv):
 
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :3] = base_origin
+
+        #======= Apply a fixed right-turn spawn yaw offset for LiDAR debugging ======
+        # spawn_yaw = torch.full(
+        #     (env_ids.shape[0],),
+        #     -math.radians(60.0),
+        #     device=self.device,
+        #     dtype=default_root_state.dtype,
+        # )
+        # zero_angles = torch.zeros_like(spawn_yaw)
+        # default_root_state[:, 3:7] = quat_from_euler_xyz(zero_angles, zero_angles, spawn_yaw)
+        #================ DEBUGGING END ================
+
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
@@ -569,6 +595,3 @@ class Go2HybridEnv(DirectRLEnv):
             scales=scales.cpu().numpy(),
             marker_indices=marker_indices.cpu().numpy(),
         )
-
-
-

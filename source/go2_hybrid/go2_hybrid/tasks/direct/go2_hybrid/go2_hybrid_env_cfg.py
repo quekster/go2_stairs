@@ -1,5 +1,8 @@
 from pathlib import Path
+import isaaclab.envs.mdp as mdp
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
@@ -16,6 +19,36 @@ from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 from .curriculum_phases import get_phase  # or from .phases import get_phase
 
+
+@configclass
+class EventCfg:
+    """Domain randomization events for DirectEnv."""
+
+    robot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.2, 2.5),
+            "dynamic_friction_range": (0.2, 2.3),
+            "restitution_range": (0.0, 0.8),
+            "num_buckets": 64,
+        },
+    )
+
+    robot_actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.85, 1.15),
+            "damping_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
 
@@ -29,7 +62,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_episode_length = int(episode_length_s / (dt * decimation))
 
     ###### Phase related configs ######
-    phase_id: int = 3 #manually change this for different curriculum phase
+    phase_id: int = 4 #manually change this for different curriculum phase
     end_point_pos: float = 0.0 #set in post __init__ below
     base_x_offset: float = 0.0
     base_z_offset: float = 0.0
@@ -39,6 +72,21 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     ######
 
     lidar_range: float = 70.0
+    ground_plane_height: float = -0.0025
+    ground_plane_size: tuple[float, float] = (2.0e6, 2.0e6)
+    ground_plane: AssetBaseCfg | None = None
+    ground_contact_sensor_cfg: ContactSensorCfg | None = None
+
+    # ------- domain randomization (DirectEnv reset-time) ------- #
+    randomize_rigid_body_material: bool = True
+    static_friction_range: tuple[float, float] = (0.2, 2.5)
+    dynamic_friction_range: tuple[float, float] = (0.2, 2.3)
+    restitution_range: tuple[float, float] = (0.0, 0.8)
+    material_num_buckets: int = 64
+
+    randomize_actuator_gains: bool = True
+    stiffness_distribution_params: tuple[float, float] = (0.85, 1.15)
+    damping_distribution_params: tuple[float, float] = (0.85, 1.15)
 
     #simulation
     sim: SimulationCfg = SimulationCfg(
@@ -57,6 +105,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=200, env_spacing=0.0, replicate_physics=True
     )
+
+    events: EventCfg = EventCfg()
 
     if phase_id != 0:
         # Action noise (applied to the raw [-1, 1] actions coming from the policy)
@@ -200,3 +250,44 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         else:
             # Phase 0: ensure /World/Terrain exists as a mesh for raycasters/contact filtering
             self.terrain.terrain_type = "plane"
+
+        if self.events is not None:
+            if self.randomize_rigid_body_material:
+                material_event = self.events.robot_physics_material
+                material_event.params["static_friction_range"] = (0.2, 2.5)
+                material_event.params["dynamic_friction_range"] = (0.2, 2.3)
+                material_event.params["restitution_range"] = (0.0, 0.8)
+                material_event.params["num_buckets"] = 64
+            else:
+                self.events.robot_physics_material = None
+
+            if self.randomize_actuator_gains:
+                gains_event = self.events.robot_actuator_gains
+                gains_event.params["stiffness_distribution_params"] = (0.85, 1.15)
+                gains_event.params["damping_distribution_params"] = (0.85, 1.15)
+            else:
+                self.events.robot_actuator_gains = None
+
+        # Phase 4 only: add a global fallback ground plane below the terrain.
+        if int(self.phase_id) == 4:
+            self.ground_plane = AssetBaseCfg(
+                prim_path="/World/ground",
+                spawn=sim_utils.GroundPlaneCfg(
+                    physics_material=self.terrain.physics_material,
+                    size=self.ground_plane_size,
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, self.ground_plane_height)),
+                collision_group=-1,
+            )
+            self.ground_contact_sensor_cfg = ContactSensorCfg(
+                prim_path="/World/envs/env_.*/Robot/.*",
+                history_length=3,
+                update_period=0.005,
+                track_air_time=False,
+                debug_vis=False,
+                filter_prim_paths_expr=[f"{self.ground_plane.prim_path}/GroundPlane/CollisionPlane"],
+                max_contact_data_count_per_prim=20,
+            )
+        else:
+            self.ground_plane = None
+            self.ground_contact_sensor_cfg = None

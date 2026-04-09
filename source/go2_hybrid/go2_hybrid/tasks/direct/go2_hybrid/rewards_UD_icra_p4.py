@@ -608,24 +608,44 @@ def stand_still_cmd_penalty(
     env,
     yaw_weight: float = 0.5,
     jiggle_weight: float = 0.25,
+    joint_hold_weight: float = 1.0,
+    cmd_eps: float = 1.0e-2,
+    flat_roll_pitch_sin_thresh: float = 0.12,
+    flat_terrain_delta_thresh: float = 0.04,
+    terrain_scan_radius: float = 0.12,
 ) -> torch.Tensor:
     """
-    Penalize body motion and action jitter only when command is exactly zero.
+    Penalize stop jitter and joint offset from default only when:
+      1) velocity/yaw command is near zero, and
+      2) robot stance is on flat ground.
+
+    Flat-ground gate uses both:
+      - base orientation (projected gravity x/y), and
+      - local terrain height spread under the 4 feet.
     """
-    cmd = env._commands
-    stop_mask = (
-        (cmd[:, 0] == 0.0)
-        & (cmd[:, 1] == 0.0)
-        & (cmd[:, 2] == 0.0)
-    ).float()
+    cmd = env._commands[:, :3]
+    stop_mask = (torch.norm(cmd, dim=1) < cmd_eps)
+
+    g_xy = torch.norm(env._robot.data.projected_gravity_b[:, :2], dim=1)
+    orientation_flat = g_xy < flat_roll_pitch_sin_thresh
+
+    terrain_z_b = feet_height_scanner(env, radius=terrain_scan_radius)  # [N,4]
+    terrain_step = torch.max(terrain_z_b, dim=1).values - torch.min(terrain_z_b, dim=1).values
+    terrain_step = torch.nan_to_num(terrain_step, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
+    terrain_flat = terrain_step < flat_terrain_delta_thresh
+
+    flat_stop_mask = (stop_mask & orientation_flat & terrain_flat).float()
 
     lin_xy_sq = torch.sum(env._robot.data.root_lin_vel_b[:, :2] ** 2, dim=1)
     yaw_rate_sq = env._robot.data.root_ang_vel_b[:, 2] ** 2
     action_delta = env._actions - env._previous_actions
     action_jiggle = torch.mean(action_delta ** 2, dim=1)
+    joint_default_err = torch.mean(
+        (env._robot.data.joint_pos - env._robot.data.default_joint_pos) ** 2, dim=1
+    )
 
-    penalty = lin_xy_sq + yaw_weight * yaw_rate_sq + jiggle_weight * action_jiggle
-    return penalty * stop_mask
+    penalty = lin_xy_sq + yaw_weight * yaw_rate_sq + jiggle_weight * action_jiggle + joint_hold_weight * joint_default_err
+    return penalty * flat_stop_mask
 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -688,7 +708,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
         "hip_deflection_l2": -5.0,
-        "track_center_path": 2.0,
+        "track_center_path": 4.0,
         "rear_swing_pitch": 2.0,
         "stand_still_cmd_penalty": -2.0
     }
