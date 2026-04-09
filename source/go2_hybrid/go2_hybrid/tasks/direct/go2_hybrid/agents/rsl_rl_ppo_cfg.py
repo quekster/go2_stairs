@@ -151,7 +151,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     
 
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.15, #change to 0.15 for phase 1-4, 0.8 for phase 0
+        init_noise_std=0.8, #change to 0.15 for phase 1-4, 0.8 for phase 0
         actor_hidden_dims=[256, 256, 128],
         critic_hidden_dims=[256, 256, 128],
         activation="elu",
@@ -170,10 +170,10 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        # symmetry_cfg=RslRlSymmetryCfg(
-        #     use_data_augmentation=True,
-        #     use_mirror_loss=True,
-        #     mirror_loss_coeff=0.5,
-        #     data_augmentation_func=compute_symmetric_states,
-        # ),
+        symmetry_cfg=RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=True,
+            mirror_loss_coeff=0.5,
+            data_augmentation_func=compute_symmetric_states,
+        ),
     )

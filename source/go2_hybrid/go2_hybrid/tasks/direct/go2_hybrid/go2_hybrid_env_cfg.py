@@ -29,7 +29,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_episode_length = int(episode_length_s / (dt * decimation))
 
     ###### Phase related configs ######
-    phase_id: int = 4 #manually change this for different curriculum phase
+    phase_id: int = 0 #manually change this for different curriculum phase
     end_point_pos: float = 0.0 #set in post __init__ below
     base_x_offset: float = 0.0
     base_z_offset: float = 0.0
@@ -55,7 +55,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     # ---------- scene ----------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200, env_spacing=0.0, replicate_physics=True
+        num_envs=200, env_spacing=1.0, replicate_physics=True
     )
 
     if phase_id != 0:
