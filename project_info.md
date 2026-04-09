@@ -3,7 +3,7 @@
 This project implements a **DirectRLEnv-based reinforcement learning pipeline** to train a **Unitree Go2** quadruped robot to **ascend (and later descend) custom stair terrains** using PPO.
 A **LiDAR ray-based terrain perception module** guides the policy, producing a **non-blind, perception-aware controller**.
 
-The project follows a **three-phase curriculum**, and all implementation details—including environment logic, reward shaping, termination functions, and LiDAR processing—are included below.
+The project follows a **five-phase curriculum**, and all implementation details—including environment logic, reward shaping, termination functions, and LiDAR processing—are included below.
 
 ---
 
@@ -56,7 +56,24 @@ The training uses a **three-phase curriculum**:
 * Learn bidirectional stability and terrain negotiation.
 * Terrain replaced with a custom staircase mesh (`updown_18cm.usdz`) with 18cm step height
 
-### **Phase 3 — Uneven Icra Challenge Map terrain**
+### **Phase 4 — Stair Ascend + Descend (18cm)**
+
+* Continued work from best ascending and descending controller on 18cm steps.
+* this phase focuses on sim2sim/sim2real tuning of the policy
+* added in domain randomisation for friction, joint PD values using ManagerBasedRLEnv Event class
+* Learn how to take in 0 for a command velocity and stay still
+* Decrease Lidar update_rate to 5.5Hz for more realistic output of policy for deployment purposes
+* Terrain uses new custom staircase mesh (`updown_18cm_wide.usdz`), which is similar to `updown_18cm.usdz` but just much wider.
+
+
+### **Phase 5 — Stair Ascend + Descend (18cm)**
+
+* Continued work from best ascending and descending controller on 18cm steps with domain randomisation and slower lidar.
+* this phase focuses further tuning for sim2sim/sim2real 
+* added in random external forces to train policy for more domain generalisation
+* Terrain uses previous custom staircase mesh (`updown_18cm_wide.usdz`), which is similar to `updown_18cm.usdz` but just much wider.
+
+### **Phase 5 — Uneven Icra Challenge Map terrain**
 
 * Fine-tune from best ascending and descending controller on 18cm steps.
 * Learn bidirectional stability and terrain negotiation on a non-stairs but uneven map
@@ -83,7 +100,9 @@ go2_hybrid/
     rewards.py                              # reward dispatcher
     rewards_plane_p0			    #reward file for phase 0
     rewards_ascent_p1			    #reward file for phase 1
-    rewards_UD_icra_p2       	  	    #reward file for phase 2
+    rewards_UD_p2_p3       	  	    #reward file for phase 2/3
+    rewards_UD_icra_p4       	  	    #reward file for phase 4
+    rewards_UD_icra_p5       	  	    #reward file for phase 5
     terminations.py                         # termination conditions
     curriculum_phases.py		    #specifications for different curriculum phases
     __init__.py
@@ -97,7 +116,7 @@ Key source files (with citations):
 
 * Environment logic: **go2_hybrid_env.py** 
 * Environment configuration: **go2_hybrid_env_cfg.py** 
-* Reward functions: **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_icra_p2.py**
+* Reward functions: **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py**
 * Termination conditions: **terminations.py** 
 * Different Curriculum Phases specification: **curriclum_phases.py**
 * Implementation of symmetry: **rsl_rl_ppo_cfg.py**
@@ -155,7 +174,7 @@ Critic receives **privileged** information: body forces, torques, contact histor
 
 # **5. LiDAR Processing Pipeline**
 
-Located in **go2_hybrid_env.py** and **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_icra_p2.py**.
+Located in **go2_hybrid_env.py** and **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py**.
 All LiDAR hits are:
 
 1. Retrieved in **world frame**
@@ -165,13 +184,13 @@ All LiDAR hits are:
 
 Terrain height is estimated using the **lowest-elevation LiDAR channel**, averaging z-values in base frame:
 `terrain_height_b = mean(z_vals)`
-(see **get_height_lidar** in **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_icra_p2.py**) 
+(see **get_height_lidar** in **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py**) 
 
 ---
 
 # **6. Reward Function Design**
 
-Reward components are defined in **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_icra_p2.py** and dispatched based on different curriculum in **rewards.py** .
+Reward components are defined in **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py** and dispatched based on different curriculum in **rewards.py** .
 
 ### **Velocity Tracking**
 
@@ -252,6 +271,7 @@ Inside `Go2HybridEnv._pre_physics_step` and `resample_commands()`:
   * Heading fixed toward stairs.
   * Forward vx ∈ [0.4, 1.0]
   * vy = 0, yaw_rate = 0.
+  * every 20% of time, vx is sampled to be 0.
 
 Actions are scaled:
 `processed_actions = action_scale * actions + default_joint_pos`,

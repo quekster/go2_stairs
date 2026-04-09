@@ -13,9 +13,70 @@ def nan_check(reward: torch.Tensor, obs_type: str):
 
 def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded linear velocity (x,y) in body frame."""
+    # cmd_body = get_heading_rotated_commands(env)
+    # lin_vel_err = torch.sum(torch.square(cmd_body[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     lin_vel_error = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     return torch.exp(-lin_vel_error / std2)
 
+
+def _external_wrench_disturbance_mask(
+    env,
+    ext_force_thresh: float = 1.0,
+    ext_torque_thresh: float = 0.15,
+) -> torch.Tensor:
+    """Return [N] float mask for environments currently under non-trivial external base wrench."""
+    base_body_id = int(getattr(env, "_base_body_id", 0))
+    disturbance_mask = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+
+    force_buffer = getattr(env._robot, "_external_force_b", None)
+    torque_buffer = getattr(env._robot, "_external_torque_b", None)
+    if (
+        force_buffer is not None
+        and torque_buffer is not None
+        and force_buffer.ndim == 3
+        and torque_buffer.ndim == 3
+        and force_buffer.shape[1] > base_body_id
+        and torque_buffer.shape[1] > base_body_id
+    ):
+        ext_force_mag = torch.linalg.norm(force_buffer[:, base_body_id, :], dim=1)
+        ext_torque_mag = torch.linalg.norm(torque_buffer[:, base_body_id, :], dim=1)
+        disturbance_mask = ((ext_force_mag > ext_force_thresh) | (ext_torque_mag > ext_torque_thresh)).float()
+    return disturbance_mask
+
+
+def disturbance_stabilisation(
+    env,
+    std2: float = 0.25,
+    settle_gravity_thresh: float = 0.20,
+    settle_ang_vel_thresh: float = 1.50,
+    gate_sharpness: float = 20.0,
+    ext_force_thresh: float = 1.0,
+    ext_torque_thresh: float = 0.15,
+) -> torch.Tensor:
+    """
+    Delta term to encourage 'stabilize first, then track' under active external wrench.
+
+    Important:
+      - This is a *delta* relative to `track_lin_vel_xy_exp`.
+      - If its weight is set to 1.0 and `track_lin_vel_xy_exp` stays unchanged, the total
+        behavior matches the previously blended tracker under disturbance.
+      - Set its weight to 0.0 for a clean ablation back to baseline.
+    """
+    track_reward = track_lin_vel_xy_exp(env, std2=std2)
+
+    g_xy = torch.norm(env._robot.data.projected_gravity_b[:, :2], dim=1)
+    ang_xy = torch.norm(env._robot.data.root_ang_vel_b[:, :2], dim=1)
+    settled_gravity = torch.sigmoid(gate_sharpness * (settle_gravity_thresh - g_xy))
+    settled_ang = torch.sigmoid(gate_sharpness * (settle_ang_vel_thresh - ang_xy))
+    settled_gate = settled_gravity * settled_ang
+
+    stabilize_reward = torch.exp(-(4.0 * g_xy * g_xy + 0.5 * ang_xy * ang_xy))
+    disturbed_target = (1.0 - settled_gate) * stabilize_reward + settled_gate * track_reward
+
+    disturbance_mask = _external_wrench_disturbance_mask(
+        env, ext_force_thresh=ext_force_thresh, ext_torque_thresh=ext_torque_thresh
+    )
+    return disturbance_mask * (disturbed_target - track_reward)
 
 def track_modified_vel_reward(env, base_std2=0.25, pitch_thresh=0.15):
     """
@@ -158,10 +219,22 @@ def undesired_contacts(env, threshold: float = 1.0) -> torch.Tensor:
     return torch.sum(is_contact, dim=1)
 
 #Phase 0: flat walking
-def flat_orientation(env) -> torch.Tensor:
-    """Penalize non-flat base orientation using L2 squared kernel."""
-    result = torch.sum(torch.square(env._robot.data.projected_gravity_b[:, :2]), dim=1)
-    return result
+def flat_orientation(
+    env,
+    flat_terrain_delta_thresh: float = 0.04,
+    terrain_scan_radius: float = 0.12,
+) -> torch.Tensor:
+    """Penalize non-flat base orientation only when stance is on locally flat terrain."""
+    # Base orientation penalty (roll + pitch components from projected gravity in base frame).
+    orientation_penalty = torch.sum(torch.square(env._robot.data.projected_gravity_b[:, :2]), dim=1)
+
+    # Gate to only activate on locally flat ground.
+    terrain_z_b = feet_height_scanner(env, radius=terrain_scan_radius)  # [N, 4]
+    terrain_step = torch.max(terrain_z_b, dim=1).values - torch.min(terrain_z_b, dim=1).values
+    terrain_step = torch.nan_to_num(terrain_step, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
+    flat_ground_mask = (terrain_step < flat_terrain_delta_thresh).float()
+
+    return orientation_penalty * flat_ground_mask
 
 def flat_orientation_roll(env) -> torch.Tensor:
     """
@@ -650,6 +723,7 @@ def stand_still_cmd_penalty(
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
         "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
+        "disturbance_stabilisation": disturbance_stabilisation(env),
         # "track_modified_vel_reward": track_modified_vel_reward(env),
         "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
         "lin_vel_z_penalty": lin_vel_z_penalty(env),
@@ -683,6 +757,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     # --- Scales: tuned for flat-ground learning ---
     w = {
         "track_lin_vel_xy_exp": 8.0,
+        "disturbance_stabilisation": 2.0,
         # "track_modified_vel_reward": 2.0,
         "track_ang_vel_z_exp": 1.0,
          "lin_vel_z_penalty": -0.5,       
@@ -691,7 +766,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
         "undesired_contacts": -4.0,
-        "flat_orientation": -0.8, 
+        "flat_orientation": -2.0, 
         "flat_orientation_roll": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
@@ -707,7 +782,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
         "hip_deflection_l2": -5.0,
-        "track_center_path": 4.0,
+        "track_center_path": 5.0,
         "rear_swing_pitch": 2.0,
         "stand_still_cmd_penalty": -2.0
     }

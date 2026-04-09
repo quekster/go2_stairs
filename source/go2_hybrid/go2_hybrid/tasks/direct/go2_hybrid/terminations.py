@@ -24,16 +24,27 @@ def illegal_contact(env, threshold: float = 5.0, body_names: list[str] = ["base"
     return torch.any(max_force > threshold, dim=1)
 
 
-def out_of_bounds(env, margin: float = 0.5) -> torch.Tensor:
+def out_of_bounds(env, margin: float = 0.5, ground_contact_threshold: float = 0.1) -> torch.Tensor:
     """
-    Terminate when the robot leaves its assigned area or falls below ground.
+    Terminate when out of the allowed region.
+
+    - Phase 4: terminate on contact with /World/ground.
+    - Other phases: keep legacy below-ground check.
     """
+    # Keep this argument for compatibility with existing callers.
+    del margin
+
+    if getattr(env, "phase_id", -1) == 4 and getattr(env, "_ground_contact_sensor", None) is not None:
+        force_hist = env._ground_contact_sensor.data.force_matrix_w_history
+        # Expected shape: [N, T, B, M, 3], where M is the number of filter prims.
+        if force_hist is not None and force_hist.numel() > 0 and force_hist.shape[3] > 0:
+            force_mag = torch.norm(force_hist, dim=-1)
+            max_force = torch.amax(force_mag, dim=(1, 2, 3))
+            return max_force > ground_contact_threshold
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
     base_pos = env._robot.data.root_pos_w           # [N, 3]
     env_origins = env._terrain.env_origins          # [N, 3]
-
-    # # distance in XY from center
-    # rel_xy = base_pos[:, :2] - env_origins[:, :2]
-    # out_xy = torch.any(torch.abs(rel_xy) > (env.scene.cfg.env_spacing / 2 + margin), dim=1)
 
     # below ground level
     below_ground = base_pos[:, 2] < (env_origins[:, 2] - 0.1)

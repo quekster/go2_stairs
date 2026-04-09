@@ -1,5 +1,8 @@
 from pathlib import Path
+import isaaclab.envs.mdp as mdp
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
@@ -16,6 +19,71 @@ from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 from .curriculum_phases import get_phase  # or from .phases import get_phase
 
+
+@configclass
+class EventCfg:
+    """Domain randomization events for DirectEnv."""
+
+    robot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.2, 2.5),
+            "dynamic_friction_range": (0.2, 2.3),
+            "restitution_range": (0.0, 0.8),
+            "num_buckets": 64,
+        },
+    )
+
+    robot_actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.85, 1.15),
+            "damping_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    add_base_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "mass_distribution_params": (-5.0, 5.0),
+            "operation": "add",
+        },
+    )
+
+    base_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "com_range": {
+                "x": (-0.05, 0.05),
+                "y": (-0.05, 0.05),
+                "z": (-0.01, 0.01),
+            },
+        },
+    )
+
+    base_external_force_torque = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "force_range": (-5.0, 5.0),
+            "torque_range": (-1.0, 1.0),
+        },
+        interval_range_s=(10.0, 10.0),
+        is_global_time=False,
+    )
+
+
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
 
@@ -29,7 +97,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_episode_length = int(episode_length_s / (dt * decimation))
 
     ###### Phase related configs ######
-    phase_id: int = 3 #manually change this for different curriculum phase
+    phase_id: int = 5 #manually change this for different curriculum phase
     end_point_pos: float = 0.0 #set in post __init__ below
     base_x_offset: float = 0.0
     base_z_offset: float = 0.0
@@ -39,6 +107,36 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     ######
 
     lidar_range: float = 70.0
+    ground_plane_height: float = -0.0025
+    ground_plane_size: tuple[float, float] = (2.0e6, 2.0e6)
+    ground_plane: AssetBaseCfg | None = None
+    ground_contact_sensor_cfg: ContactSensorCfg | None = None
+
+    # ------- domain randomization (DirectEnv startup/reset-time) ------- #
+    randomize_rigid_body_material: bool = True
+    static_friction_range: tuple[float, float] = (0.2, 2.5)
+    dynamic_friction_range: tuple[float, float] = (0.2, 2.3)
+    restitution_range: tuple[float, float] = (0.0, 0.8)
+    material_num_buckets: int = 64
+
+    randomize_actuator_gains: bool = True
+    stiffness_distribution_params: tuple[float, float] = (0.85, 1.15)
+    damping_distribution_params: tuple[float, float] = (0.85, 1.15)
+
+    randomize_add_base_mass: bool = True
+    add_base_mass_distribution_params: tuple[float, float] = (-5.0, 5.0)
+
+    randomize_base_com: bool = True
+    base_com_x_range: tuple[float, float] = (-0.05, 0.05)
+    base_com_y_range: tuple[float, float] = (-0.05, 0.05)
+    base_com_z_range: tuple[float, float] = (-0.01, 0.01)
+
+    randomize_base_external_force_torque: bool = True
+    base_external_force_range: tuple[float, float] = (-5.0, 5.0)
+    base_external_torque_range: tuple[float, float] = (-1.0, 1.0)
+    base_external_force_mode: str = "interval"  # "reset" or "interval"
+    base_external_force_interval_s: tuple[float, float] = (3.0, 10.0)
+    base_external_force_global_time: bool = False
 
     #simulation
     sim: SimulationCfg = SimulationCfg(
@@ -57,6 +155,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=200, env_spacing=0.0, replicate_physics=True
     )
+
+    events: EventCfg = EventCfg()
 
     if phase_id != 0:
         # Action noise (applied to the raw [-1, 1] actions coming from the policy)
@@ -200,3 +300,75 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         else:
             # Phase 0: ensure /World/Terrain exists as a mesh for raycasters/contact filtering
             self.terrain.terrain_type = "plane"
+
+        if self.events is not None:
+            if self.randomize_rigid_body_material:
+                material_event = self.events.robot_physics_material
+                material_event.params["static_friction_range"] = (0.2, 2.5)
+                material_event.params["dynamic_friction_range"] = (0.2, 2.3)
+                material_event.params["restitution_range"] = (0.0, 0.8)
+                material_event.params["num_buckets"] = 64
+            else:
+                self.events.robot_physics_material = None
+
+            if self.randomize_actuator_gains:
+                gains_event = self.events.robot_actuator_gains
+                gains_event.params["stiffness_distribution_params"] = (0.85, 1.15)
+                gains_event.params["damping_distribution_params"] = (0.85, 1.15)
+            else:
+                self.events.robot_actuator_gains = None
+
+            if self.randomize_add_base_mass:
+                base_mass_event = self.events.add_base_mass
+                base_mass_event.params["mass_distribution_params"] = self.add_base_mass_distribution_params
+            else:
+                self.events.add_base_mass = None
+
+            if self.randomize_base_com:
+                base_com_event = self.events.base_com
+                base_com_event.params["com_range"] = {
+                    "x": self.base_com_x_range,
+                    "y": self.base_com_y_range,
+                    "z": self.base_com_z_range,
+                }
+            else:
+                self.events.base_com = None
+
+            if self.randomize_base_external_force_torque:
+                ext_wrench_event = self.events.base_external_force_torque
+                ext_wrench_event.params["force_range"] = self.base_external_force_range
+                ext_wrench_event.params["torque_range"] = self.base_external_torque_range
+                if self.base_external_force_mode not in ("reset", "interval"):
+                    raise ValueError(
+                        f"Unsupported base_external_force_mode='{self.base_external_force_mode}'. "
+                        "Use 'reset' or 'interval'."
+                    )
+                ext_wrench_event.mode = self.base_external_force_mode
+                ext_wrench_event.interval_range_s = self.base_external_force_interval_s
+                ext_wrench_event.is_global_time = self.base_external_force_global_time
+            else:
+                self.events.base_external_force_torque = None
+
+        # Phase 4 only: add a global fallback ground plane below the terrain.
+        if int(self.phase_id) == 4:
+            self.ground_plane = AssetBaseCfg(
+                prim_path="/World/ground",
+                spawn=sim_utils.GroundPlaneCfg(
+                    physics_material=self.terrain.physics_material,
+                    size=self.ground_plane_size,
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, self.ground_plane_height)),
+                collision_group=-1,
+            )
+            self.ground_contact_sensor_cfg = ContactSensorCfg(
+                prim_path="/World/envs/env_.*/Robot/.*",
+                history_length=3,
+                update_period=0.005,
+                track_air_time=False,
+                debug_vis=False,
+                filter_prim_paths_expr=[f"{self.ground_plane.prim_path}/GroundPlane/CollisionPlane"],
+                max_contact_data_count_per_prim=20,
+            )
+        else:
+            self.ground_plane = None
+            self.ground_contact_sensor_cfg = None
