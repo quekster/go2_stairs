@@ -48,6 +48,14 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=200, env_spacing=0.0, replicate_physics=True
     )
+    # Action noise (applied to the raw [-1, 1] actions coming from the policy)
+    action_noise_model = NoiseModelCfg(
+        noise_cfg=GaussianNoiseCfg(
+            mean=0.0,
+            std=0.20,          
+            operation="add",
+        )
+    )
 
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
