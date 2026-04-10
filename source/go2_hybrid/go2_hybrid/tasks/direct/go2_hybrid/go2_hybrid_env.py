@@ -29,10 +29,9 @@ class Go2HybridEnv(DirectRLEnv):
     cfg: Go2HybridEnvCfg
 
     def __init__(self, cfg: Go2HybridEnvCfg, render_mode: str | None = None, **kwargs):
-        
-    
+        # --- DR DISABLED (EXTERNAL FORCE): force arrow visualization hook ---
+        self._external_force_vis_enabled = False
 
-        
         super().__init__(cfg, render_mode, **kwargs)
 
         self._step_counter =0
@@ -82,19 +81,19 @@ class Go2HybridEnv(DirectRLEnv):
 
 
     def _setup_scene(self):
-        phase_id = int(self.cfg.phase_id)
-        self._ground_contact_sensor = None
-        ground_plane_cfg = getattr(self.cfg, "ground_plane", None)
-        has_ground_plane = ground_plane_cfg is not None and ground_plane_cfg.spawn is not None
+        # phase_id = int(self.cfg.phase_id)
+        # self._ground_contact_sensor = None
+        # ground_plane_cfg = getattr(self.cfg, "ground_plane", None)
+        # has_ground_plane = ground_plane_cfg is not None and ground_plane_cfg.spawn is not None
 
-        # Spawn optional fallback ground plane configured in env cfg.
-        if has_ground_plane:
-            ground_plane_cfg.spawn.func(
-                ground_plane_cfg.prim_path,
-                ground_plane_cfg.spawn,
-                translation=ground_plane_cfg.init_state.pos,
-                orientation=ground_plane_cfg.init_state.rot,
-            )
+        # # Spawn optional fallback ground plane configured in env cfg.
+        # if has_ground_plane:
+        #     ground_plane_cfg.spawn.func(
+        #         ground_plane_cfg.prim_path,
+        #         ground_plane_cfg.spawn,
+        #         translation=ground_plane_cfg.init_state.pos,
+        #         orientation=ground_plane_cfg.init_state.rot,
+        #     )
 
         # Spawn robot from cfg
         self._robot = Articulation(self.cfg.robot_cfg)   # note: cfg attribute name is robot_cfg in your direct cfg
@@ -103,10 +102,10 @@ class Go2HybridEnv(DirectRLEnv):
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        if phase_id == 4 and has_ground_plane and self.cfg.ground_contact_sensor_cfg is not None:
-            ground_contact_sensor_cfg = self.cfg.ground_contact_sensor_cfg
-            self._ground_contact_sensor = ContactSensor(ground_contact_sensor_cfg)
-            self.scene.sensors["ground_contact_sensor"] = self._ground_contact_sensor
+        # if phase_id == 4 and has_ground_plane and self.cfg.ground_contact_sensor_cfg is not None:
+        #     ground_contact_sensor_cfg = self.cfg.ground_contact_sensor_cfg
+        #     self._ground_contact_sensor = ContactSensor(ground_contact_sensor_cfg)
+        #     self.scene.sensors["ground_contact_sensor"] = self._ground_contact_sensor
 
         self._height_scanner=RayCaster(self.cfg.height_scanner)
         self.scene.sensors["height_scanner"]=self._height_scanner 
@@ -202,9 +201,11 @@ class Go2HybridEnv(DirectRLEnv):
         self._lidar_origin_marker_indices = torch.tensor([0], device=self.device)  # 1 marker
 
         self._vel_markers = VisualizationMarkers(_vel_marker_cfg)
-        self._force_markers = (
-            VisualizationMarkers(_force_marker_cfg) if self._external_force_vis_enabled else None
-        )
+        # --- DR DISABLED (EXTERNAL FORCE): disable external force marker instantiation ---
+        # self._force_markers = (
+        #     VisualizationMarkers(_force_marker_cfg) if self._external_force_vis_enabled else None
+        # )
+        self._force_markers = None
 
         #----------------------------------------------#
 
@@ -212,9 +213,14 @@ class Go2HybridEnv(DirectRLEnv):
         # Clone & replicate envs
         self.scene.clone_environments(copy_from_source=False)
 
-        # CPU collision filtering (same as reference)
-        if self.device == "cpu" and has_ground_plane:
-            self.scene.filter_collisions(global_prim_paths=[ground_plane_cfg.prim_path])
+        # # CPU collision filtering (same as reference)
+        # if self.device == "cpu" and has_ground_plane:
+        #     self.scene.filter_collisions(global_prim_paths=[ground_plane_cfg.prim_path])
+
+        #for phase 0
+        if self.device == "cpu":
+            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+
 
         # Light
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -288,8 +294,9 @@ class Go2HybridEnv(DirectRLEnv):
         # print("lidar_obs[0] as list:", lidar_obs[0])
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
-        if self.phase_id == 5:
-            self._visualize_external_force_arrows()
+        # --- DR DISABLED (EXTERNAL FORCE): disable external force arrow visualization ---
+        # if self.phase_id == 5:
+        #     self._visualize_external_force_arrows()
 
         ###### Used for forward_progress_position
         # 1. Read current x position
@@ -440,32 +447,31 @@ class Go2HybridEnv(DirectRLEnv):
         # Phase 0: Flat ground
         # Random 2D velocity + heading + yaw rate
         # -------------------------
-        # if self.phase_id == 0:
-        #     heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
-        #     self._commands[env_ids, 3] = heading
-
-        #     speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
-        #     direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
-
-        #     cmd_vx = speed * torch.cos(heading + direction_offset)
-        #     cmd_vy = speed * torch.sin(heading + direction_offset)
-        #     yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
-
-        #     self._commands[env_ids, 0] = cmd_vx
-        #     self._commands[env_ids, 1] = cmd_vy
-        #     self._commands[env_ids, 2] = yaw_rate
-        #     # print("HEREHREHREHRHERE IN COMMANDS")
-
         if self.phase_id == 0:
-            speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
-            body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
+            heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
+            self._commands[env_ids, 3] = heading
 
-            self._commands[env_ids, 0] = speed * torch.cos(body_dir)   # cmd_vx in base frame
-            self._commands[env_ids, 1] = speed * torch.sin(body_dir)   # cmd_vy in base frame
-            self._commands[env_ids, 2] = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+            speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+            direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
 
-            # keep only if you still use heading reward; else set to 0
-            self._commands[env_ids, 3] = 0.0
+            cmd_vx = speed * torch.cos(heading + direction_offset)
+            cmd_vy = speed * torch.sin(heading + direction_offset)
+            yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+
+            self._commands[env_ids, 0] = cmd_vx
+            self._commands[env_ids, 1] = cmd_vy
+            self._commands[env_ids, 2] = yaw_rate
+
+            # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
+            # speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+            # body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
+            #
+            # self._commands[env_ids, 0] = speed * torch.cos(body_dir)   # cmd_vx in base frame
+            # self._commands[env_ids, 1] = speed * torch.sin(body_dir)   # cmd_vy in base frame
+            # self._commands[env_ids, 2] = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+            #
+            # # keep only if you still use heading reward; else set to 0
+            # self._commands[env_ids, 3] = 0.0
 
 
 
@@ -579,8 +585,20 @@ class Go2HybridEnv(DirectRLEnv):
         default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
         
         # ================= Command (green) arrow =================
-        # Commands are already sampled in body frame (vx, vy).
-        cmd_body = self._commands[env_ids, :2]
+        # World-frame sampling path: rotate commanded (vx, vy) by heading to body intent.
+        heading = self._commands[env_ids, 3]
+        cos_h = torch.cos(heading)
+        sin_h = torch.sin(heading)
+
+        vx = self._commands[env_ids, 0]
+        vy = self._commands[env_ids, 1]
+        vx_rot = cos_h * vx + sin_h * vy
+        vy_rot = -sin_h * vx + cos_h * vy
+        cmd_body = torch.stack((vx_rot, vy_rot), dim=1)
+
+        # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
+        # # Commands are already sampled in body frame (vx, vy).
+        # cmd_body = self._commands[env_ids, :2]
 
         cmd_speed = torch.linalg.norm(cmd_body, dim=1)
         arrow_scale_cmd = default_scale.clone()
