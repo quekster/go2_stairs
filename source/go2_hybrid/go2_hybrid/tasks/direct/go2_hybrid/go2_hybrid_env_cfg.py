@@ -5,7 +5,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
-from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg, DelayedPDActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 import isaaclab.sim as sim_utils
 from isaaclab.utils.noise import NoiseModelCfg, GaussianNoiseCfg
@@ -15,6 +15,72 @@ from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfInverte
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 from .curriculum_phases import get_phase  # or from .phases import get_phase
+
+
+# --- DR DISABLED (EVENT CFG): full class kept here but commented out ---
+# @configclass
+# class EventCfg:
+#     """Domain randomization events for DirectEnv."""
+#
+#     robot_physics_material = EventTerm(
+#         func=mdp.randomize_rigid_body_material,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+#             "static_friction_range": (0.2, 2.5),
+#             "dynamic_friction_range": (0.2, 2.3),
+#             "restitution_range": (0.0, 0.8),
+#             "num_buckets": 64,
+#         },
+#     )
+#
+#     robot_actuator_gains = EventTerm(
+#         func=mdp.randomize_actuator_gains,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+#             "stiffness_distribution_params": (0.85, 1.15),
+#             "damping_distribution_params": (0.85, 1.15),
+#             "operation": "scale",
+#             "distribution": "uniform",
+#         },
+#     )
+#
+#     add_base_mass = EventTerm(
+#         func=mdp.randomize_rigid_body_mass,
+#         mode="startup",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+#             "mass_distribution_params": (-5.0, 5.0),
+#             "operation": "add",
+#         },
+#     )
+#
+#     base_com = EventTerm(
+#         func=mdp.randomize_rigid_body_com,
+#         mode="startup",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+#             "com_range": {
+#                 "x": (-0.05, 0.05),
+#                 "y": (-0.05, 0.05),
+#                 "z": (-0.01, 0.01),
+#             },
+#         },
+#     )
+#
+#     base_external_force_torque = EventTerm(
+#         func=mdp.apply_external_force_torque,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+#             "force_range": (-5.0, 5.0),
+#             "torque_range": (-1.0, 1.0),
+#         },
+#         interval_range_s=(10.0, 10.0),
+#         is_global_time=False,
+#     )
+
 
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
@@ -39,8 +105,57 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     ######
 
     lidar_range: float = 70.0
+    ground_plane_height: float = -0.0025
+    ground_plane_size: tuple[float, float] = (2.0e6, 2.0e6)
+    ground_plane: AssetBaseCfg | None = None
+    ground_contact_sensor_cfg: ContactSensorCfg | None = None
 
-    #simulation
+    # ------- domain randomization (DirectEnv startup/reset-time) ------- #
+    # --- DR DISABLED (FRICTION): friction/material randomization ---
+    # randomize_rigid_body_material: bool = True
+    randomize_rigid_body_material: bool = False
+    static_friction_range: tuple[float, float] = (0.2, 2.5)
+    dynamic_friction_range: tuple[float, float] = (0.2, 2.3)
+    restitution_range: tuple[float, float] = (0.0, 0.8)
+    material_num_buckets: int = 64
+
+    # --- DR DISABLED (PD TORQUE): actuator gain randomization ---
+    # randomize_actuator_gains: bool = True
+    randomize_actuator_gains: bool = False
+    stiffness_distribution_params: tuple[float, float] = (0.85, 1.15)
+    damping_distribution_params: tuple[float, float] = (0.85, 1.15)
+
+    randomize_add_base_mass: bool = True
+    add_base_mass_distribution_params: tuple[float, float] = (-5.0, 5.0)
+
+    randomize_base_com: bool = True
+    base_com_x_range: tuple[float, float] = (-0.05, 0.05)
+    base_com_y_range: tuple[float, float] = (-0.05, 0.05)
+    base_com_z_range: tuple[float, float] = (-0.01, 0.01)
+
+    # --- DR DISABLED (EXTERNAL FORCE): external force/torque randomization ---
+    # randomize_base_external_force_torque: bool = True
+    randomize_base_external_force_torque: bool = False
+    base_external_force_range: tuple[float, float] = (-5.0, 5.0)
+    base_external_torque_range: tuple[float, float] = (-1.0, 1.0)
+    base_external_force_mode: str = "interval"  # "reset" or "interval"
+    base_external_force_interval_s: tuple[float, float] = (3.0, 10.0)
+    base_external_force_global_time: bool = False
+
+    # #simulation for phase 3-5
+    # sim: SimulationCfg = SimulationCfg(
+    #     dt=1.0 / 200.0, #physics timestep 
+    #     render_interval=decimation,
+    #     physics_material=sim_utils.RigidBodyMaterialCfg(
+    #         friction_combine_mode="average",
+    #         restitution_combine_mode="average",
+    #         static_friction=1.0,
+    #         dynamic_friction=1.0,
+    #         restitution=0.0,
+    #     ),
+    # )
+
+    #simulation for phase 0-2
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 200.0,
         render_interval=decimation,
@@ -58,6 +173,10 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         num_envs=200, env_spacing=1.0, replicate_physics=True
     )
 
+    # --- DR DISABLED (EVENT CFG): disable all event-based DR terms globally ---
+    # events: EventCfg = EventCfg()
+    events = None
+
     if phase_id != 0:
         # Action noise (applied to the raw [-1, 1] actions coming from the policy)
         action_noise_model = NoiseModelCfg(
@@ -73,7 +192,17 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         #terrain_type="generator",
         #terrain_generator=terrain_gen,
         terrain_type="",
-        usd_path="",        
+        usd_path="",       
+        #Phase 3 to 5 
+        # physics_material=sim_utils.RigidBodyMaterialCfg(
+        #     friction_combine_mode="average",
+        #     restitution_combine_mode="average",
+        #     static_friction=0.8,
+        #     dynamic_friction=0.7,
+        #     restitution=0.0,
+        # ),
+
+        #Phase 0-2
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -123,9 +252,20 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
                 saturation_effort=23.5,
                 velocity_limit=30.0,
                 stiffness=25.0,
-                damping=0.5,
+                damping=0.5, 
                 friction=0.0,
             ),
+            # "base_legs": DelayedPDActuatorCfg(
+            #     joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+            #     effort_limit=23.5,
+            #     # saturation_effort=23.5,
+            #     velocity_limit=30.0,
+            #     stiffness=25.0,
+            #     damping=0.5,
+            #     friction=0.0,
+            #     min_delay=0, #physics timesteps
+            #     max_delay=3, #physics timesteps (5ms)
+            # ),
         },
     )
 
@@ -148,9 +288,9 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             channels=5,
             vertical_fov_range= [-60,-20], horizontal_fov_range=[-45,45], horizontal_res=10.0        ),
         mesh_prim_paths=["/World/Terrain"],
-        update_period=0.0,
+        update_period = 0.0,
         history_length=0,
-        debug_vis=False,
+        debug_vis=True,
     )
     
     height_scanner=RayCasterCfg(
@@ -159,7 +299,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         ray_alignment="base",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[0.6,0.4]),    
         mesh_prim_paths=["/World/Terrain"],
-        debug_vis=True,
+        debug_vis=False,
     )
 
     def __post_init__(self):
@@ -189,3 +329,75 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         else:
             # Phase 0: ensure /World/Terrain exists as a mesh for raycasters/contact filtering
             self.terrain.terrain_type = "plane"
+
+        # if self.events is not None:
+        #     if self.randomize_rigid_body_material:
+        #         material_event = self.events.robot_physics_material
+        #         material_event.params["static_friction_range"] = (0.2, 2.5)
+        #         material_event.params["dynamic_friction_range"] = (0.2, 2.3)
+        #         material_event.params["restitution_range"] = (0.0, 0.8)
+        #         material_event.params["num_buckets"] = 64
+        #     else:
+        #         self.events.robot_physics_material = None
+
+        #     if self.randomize_actuator_gains:
+        #         gains_event = self.events.robot_actuator_gains
+        #         gains_event.params["stiffness_distribution_params"] = (0.85, 1.15)
+        #         gains_event.params["damping_distribution_params"] = (0.85, 1.15)
+        #     else:
+        #         self.events.robot_actuator_gains = None
+
+        #     if self.randomize_add_base_mass:
+        #         base_mass_event = self.events.add_base_mass
+        #         base_mass_event.params["mass_distribution_params"] = self.add_base_mass_distribution_params
+        #     else:
+        #         self.events.add_base_mass = None
+
+        #     if self.randomize_base_com:
+        #         base_com_event = self.events.base_com
+        #         base_com_event.params["com_range"] = {
+        #             "x": self.base_com_x_range,
+        #             "y": self.base_com_y_range,
+        #             "z": self.base_com_z_range,
+        #         }
+        #     else:
+        #         self.events.base_com = None
+
+        #     if self.randomize_base_external_force_torque:
+        #         ext_wrench_event = self.events.base_external_force_torque
+        #         ext_wrench_event.params["force_range"] = self.base_external_force_range
+        #         ext_wrench_event.params["torque_range"] = self.base_external_torque_range
+        #         if self.base_external_force_mode not in ("reset", "interval"):
+        #             raise ValueError(
+        #                 f"Unsupported base_external_force_mode='{self.base_external_force_mode}'. "
+        #                 "Use 'reset' or 'interval'."
+        #             )
+        #         ext_wrench_event.mode = self.base_external_force_mode
+        #         ext_wrench_event.interval_range_s = self.base_external_force_interval_s
+        #         ext_wrench_event.is_global_time = self.base_external_force_global_time
+        #     else:
+        #         self.events.base_external_force_torque = None
+
+        # Phase 4 only: add a global fallback ground plane below the terrain.
+        if int(self.phase_id) == 4:
+            self.ground_plane = AssetBaseCfg(
+                prim_path="/World/ground",
+                spawn=sim_utils.GroundPlaneCfg(
+                    physics_material=self.terrain.physics_material,
+                    size=self.ground_plane_size,
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, self.ground_plane_height)),
+                collision_group=-1,
+            )
+            self.ground_contact_sensor_cfg = ContactSensorCfg(
+                prim_path="/World/envs/env_.*/Robot/.*",
+                history_length=3,
+                update_period=0.005,
+                track_air_time=False,
+                debug_vis=False,
+                filter_prim_paths_expr=[f"{self.ground_plane.prim_path}/GroundPlane/CollisionPlane"],
+                max_contact_data_count_per_prim=20,
+            )
+        else:
+            self.ground_plane = None
+            self.ground_contact_sensor_cfg = None

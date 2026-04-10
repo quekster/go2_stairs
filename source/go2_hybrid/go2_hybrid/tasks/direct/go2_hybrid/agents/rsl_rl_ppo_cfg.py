@@ -6,6 +6,7 @@ from typing import Optional, Dict, Tuple, Union
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (
     RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticRecurrentCfg,
     RslRlPpoActorCriticCfg,
     RslRlPpoAlgorithmCfg,
     RslRlSymmetryCfg,
@@ -148,7 +149,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 100
     experiment_name = "go2_traversal"
     empirical_normalization = False
-    
+
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.8, #change to 0.15 for phase 1-4, 0.8 for phase 0
@@ -156,6 +157,17 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_hidden_dims=[256, 256, 128],
         activation="elu",
     )
+    
+    #=========For LSTM:=============
+    # policy = RslRlPpoActorCriticRecurrentCfg(
+    #     init_noise_std=0.15, #change to 0.15 for phase 1-4, 0.8 for phase 0
+    #     actor_hidden_dims=[256, 256, 128],
+    #     critic_hidden_dims=[256, 256, 128],
+    #     activation="elu",
+    #     rnn_type="lstm",      # LSTM enabled
+    #     rnn_hidden_dim=256,   # memory size
+    #     rnn_num_layers=1,     # stacked LSTM layers
+    # )
 
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,

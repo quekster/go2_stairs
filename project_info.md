@@ -3,7 +3,7 @@
 This project implements a **DirectRLEnv-based reinforcement learning pipeline** to train a **Unitree Go2** quadruped robot to **ascend (and later descend) custom stair terrains** using PPO.
 A **LiDAR ray-based terrain perception module** guides the policy, producing a **non-blind, perception-aware controller**.
 
-The project follows a **three-phase curriculum**, and all implementation details—including environment logic, reward shaping, termination functions, and LiDAR processing—are included below.
+The project follows a **five-phase curriculum**, and all implementation details—including environment logic, reward shaping, termination functions, and LiDAR processing—are included below.
 
 ---
 
@@ -40,15 +40,45 @@ The training uses a **three-phase curriculum**:
 ### **Phase 1 — Stair Ascending**
 
 * Load best checkpoint from Phase 0.
-* Terrain replaced with a custom staircase mesh (`double_stairs_10_colour.usdz`).
+* Terrain replaced with a custom staircase mesh (`100_stairs_10cm_ascending.usdz`).
 * Introduce **terrain-adaptive rewards** (e.g., LiDAR-based base height tracking, foot clearance, rear-foot stepping timing).
 * Remove symmetry augmentation, because stair climbing is inherently asymmetric.
 
-### **Phase 2 — Stair Ascend + Descend**
+### **Phase 2 — Stair Ascend + Descend (10cm)**
 
 * Fine-tune from best ascending controller.
 * Learn bidirectional stability and terrain negotiation.
+* Terrain replaced with a custom staircase mesh (`updown_10cm.usdz`) with 10cm step height
 
+### **Phase 3 — Stair Ascend + Descend (18cm)**
+
+* Fine-tune from best ascending and descending controller on 10cm steps.
+* Learn bidirectional stability and terrain negotiation.
+* Terrain replaced with a custom staircase mesh (`updown_18cm.usdz`) with 18cm step height
+
+### **Phase 4 — Stair Ascend + Descend (18cm)**
+
+* Continued work from best ascending and descending controller on 18cm steps.
+* this phase focuses on sim2sim/sim2real tuning of the policy
+* added in domain randomisation for friction, joint PD values using ManagerBasedRLEnv Event class
+* Learn how to take in 0 for a command velocity and stay still
+* Decrease Lidar update_rate to 5.5Hz for more realistic output of policy for deployment purposes
+* Terrain uses new custom staircase mesh (`updown_18cm_wide.usdz`), which is similar to `updown_18cm.usdz` but just much wider.
+
+
+### **Phase 5 — Stair Ascend + Descend (18cm)**
+
+* Continued work from best ascending and descending controller on 18cm steps with domain randomisation and slower lidar.
+* this phase focuses further tuning for sim2sim/sim2real 
+* added in random external forces to train policy for more domain generalisation
+* Terrain uses previous custom staircase mesh (`updown_18cm_wide.usdz`), which is similar to `updown_18cm.usdz` but just much wider.
+
+### **Phase 5 — Uneven Icra Challenge Map terrain**
+
+* Fine-tune from best ascending and descending controller on 18cm steps.
+* Learn bidirectional stability and terrain negotiation on a non-stairs but uneven map
+* Terrain replaced with a custom staircase mesh (`icra_map_flat_long.usdz`)
+* More of an extra task compared to main focus of thesis
 ---
 
 # **3. Project Structure**
@@ -57,14 +87,24 @@ The training uses a **three-phase curriculum**:
 go2_hybrid/
   source/go2_hybrid/go2_hybrid/tasks/direct/go2_hybrid/
     assets/
-      go2_hybrid/double_stairs_10_colour.usdz
+      go2_hybrid/
+      	100_stairs_10cm_ascending.usdz #various terrain maps
+      	updown_10cm.usdz
+      	updown_18cm.usdz
+      	icra_map_flat_long.usdz
       go2_normal/go2.usd                    # Unitree Go2 model (12 DOF)
     agents/
       rsl_rl_ppo_cfg.yaml                   # hyperparameters
     go2_hybrid_env_cfg.py                   # environment config
     go2_hybrid_env.py                       # main DirectRLEnv implementation
-    rewards.py                              # reward shaping
+    rewards.py                              # reward dispatcher
+    rewards_plane_p0			    #reward file for phase 0
+    rewards_ascent_p1			    #reward file for phase 1
+    rewards_UD_p2_p3       	  	    #reward file for phase 2/3
+    rewards_UD_icra_p4       	  	    #reward file for phase 4
+    rewards_UD_icra_p5       	  	    #reward file for phase 5
     terminations.py                         # termination conditions
+    curriculum_phases.py		    #specifications for different curriculum phases
     __init__.py
   scripts/rsl_rl/
     train.py                                # PPO training script
@@ -76,8 +116,10 @@ Key source files (with citations):
 
 * Environment logic: **go2_hybrid_env.py** 
 * Environment configuration: **go2_hybrid_env_cfg.py** 
-* Reward functions: **rewards.py** 
+* Reward functions: **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py**
 * Termination conditions: **terminations.py** 
+* Different Curriculum Phases specification: **curriclum_phases.py**
+* Implementation of symmetry: **rsl_rl_ppo_cfg.py**
 
 ---
 
@@ -92,8 +134,8 @@ The main environment is implemented in **Go2HybridEnv** (DirectRLEnv) .
 
 ### **Terrain**
 
-* Stairs: `double_stairs_10_colour.usdz`
-* Trapezium staircase with **6 steps**, each approx **10 cm**.
+* Stairs: `100_stairs_10cm_ascending.usdz`, `updown_10cm.usdz`, `updown_18cm.usdz`
+* Trapezium staircase 
 
 ### **Sensors**
 
@@ -132,7 +174,7 @@ Critic receives **privileged** information: body forces, torques, contact histor
 
 # **5. LiDAR Processing Pipeline**
 
-Located in **go2_hybrid_env.py** and **rewards.py**.
+Located in **go2_hybrid_env.py** and **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py**.
 All LiDAR hits are:
 
 1. Retrieved in **world frame**
@@ -142,13 +184,13 @@ All LiDAR hits are:
 
 Terrain height is estimated using the **lowest-elevation LiDAR channel**, averaging z-values in base frame:
 `terrain_height_b = mean(z_vals)`
-(see **get_height_lidar** in rewards.py) 
+(see **get_height_lidar** in **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py**) 
 
 ---
 
 # **6. Reward Function Design**
 
-Reward components are defined in **rewards.py** .
+Reward components are defined in **rewards.py**, **rewards_plane_p0.py**, **rewards_ascent_p1.py**, **rewards_UD_p2_p3.py**, **rewards_UD_icra_p4.py**, **rewards_UD_icra_p5.py** and dispatched based on different curriculum in **rewards.py** .
 
 ### **Velocity Tracking**
 
@@ -205,6 +247,7 @@ Key terminations:
 * **out_of_bounds** — falling below terrain
 * **flipped_over** — projected gravity indicates rollover
 * **stuck** — commanded forward but no progress for 2 seconds
+* **end_point_termination** - in event robot manages to traverse very far very well, this is to prevent the robot from falling off the map
 
 The **stuck** logic maintains an env-level counter updated every simulation step.
 
@@ -212,14 +255,23 @@ The **stuck** logic maintains an env-level counter updated every simulation step
 
 # **8. Command Sampling & Action Scaling**
 
+For Phase 0: 
+* Heading, vx, vy, yaw_rate are randomly sampled
+
+Actions are scaled:
+`processed_actions = action_scale * actions + default_joint_pos`,
+where `action_scale = 0.25`.
+
+For Phase 1 onwards:
 Inside `Go2HybridEnv._pre_physics_step` and `resample_commands()`:
 
 * Commands resampled every 8–12 seconds.
-* For stairs (Phase 1):
+* For stairs (Phase 1 onwards):
 
   * Heading fixed toward stairs.
   * Forward vx ∈ [0.4, 1.0]
   * vy = 0, yaw_rate = 0.
+  * every 20% of time, vx is sampled to be 0.
 
 Actions are scaled:
 `processed_actions = action_scale * actions + default_joint_pos`,
