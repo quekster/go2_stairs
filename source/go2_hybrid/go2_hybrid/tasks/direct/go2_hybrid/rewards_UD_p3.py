@@ -602,6 +602,28 @@ def rear_swing_pitch(
     r = torch.sum(vz_shaped * rear_swing, dim=1) * cond  # [N]
     return r
 
+def stand_still_cmd_penalty(
+    env,
+    yaw_weight: float = 0.5,
+    jiggle_weight: float = 0.25,
+) -> torch.Tensor:
+    """
+    Penalize body motion and action jitter only when command is exactly zero.
+    """
+    cmd = env._commands
+    stop_mask = (
+        (cmd[:, 0] == 0.0)
+        & (cmd[:, 1] == 0.0)
+        & (cmd[:, 2] == 0.0)
+    ).float()
+
+    lin_xy_sq = torch.sum(env._robot.data.root_lin_vel_b[:, :2] ** 2, dim=1)
+    yaw_rate_sq = env._robot.data.root_ang_vel_b[:, 2] ** 2
+    action_delta = env._actions - env._previous_actions
+    action_jiggle = torch.mean(action_delta ** 2, dim=1)
+
+    penalty = lin_xy_sq + yaw_weight * yaw_rate_sq + jiggle_weight * action_jiggle
+    return penalty * stop_mask
 
 
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -633,39 +655,10 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "hip_deflection_l2": hip_deflection_l2(env),
         "track_center_path": track_center_path(env),
         "rear_swing_pitch": rear_swing_pitch(env),
+        "stand_still_cmd_penalty": stand_still_cmd_penalty(env),
 
     }
 
-    # --- Scales: tuned for flat-ground learning ---
-    # w = {
-    #     "track_lin_vel_xy_exp": 8.0,
-    #     # "track_modified_vel_reward": 2.0,
-    #     "track_ang_vel_z_exp": 1.0,
-    #      "lin_vel_z_penalty": -0.5,       
-    #     "ang_vel_xy_penalty": -0.5,
-    #     "joint_torque_penalty": -2.0e-5,
-    #     "joint_acc_penalty": -2.0e-7,
-    #     "action_rate_penalty": -0.2,
-    #     "undesired_contacts": -4.0,
-    #     "flat_orientation": -0.8, 
-    #     "flat_orientation_roll": -2.0,
-    #     "energy_penalty": -1.0e-6,
-    #     "feet_slide_penalty": -0.5,
-    #     "foot_clearance_reward": 2.5,
-    #     "joint_pos_limit": -0.6,
-    #     "smoothness_penalty": -0.01,
-    #     "base_height_l2_lidar": -2.0,
-    #     "foot_vertical_accel_reward": 1.4,
-    #     "backward_vel_penalty": -4.0,
-    #     "feet_air_time_rear": 2.0,
-    #     "stagnation_penalty": -3.0,
-    #     "forward_progress": 2.0,
-    #     "rear_match_front": 2.0,
-    #     "foot_lateral_separation_penalty": -4.0,
-    #     "hip_deflection_l2": -5.0,
-    #     "track_center_path": 2.0,
-    #     "rear_swing_pitch": 2.0,
-    # }
     w = {
         "track_lin_vel_xy_exp": 8.0,
         # "track_modified_vel_reward": 2.0,
@@ -676,14 +669,14 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
         "undesired_contacts": -4.0,
-        "flat_orientation": -0.3, 
+        "flat_orientation": -0.8, 
         "flat_orientation_roll": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
         "foot_clearance_reward": 2.5,
         "joint_pos_limit": -0.6,
         "smoothness_penalty": -0.01,
-        "base_height_l2_lidar": -1.0,
+        "base_height_l2_lidar": -2.0,
         "foot_vertical_accel_reward": 1.4,
         "backward_vel_penalty": -4.0,
         "feet_air_time_rear": 2.0,
@@ -691,9 +684,10 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "forward_progress": 2.0,
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
-        "hip_deflection_l2": -1.0,
+        "hip_deflection_l2": -5.0,
         "track_center_path": 2.0,
-        "rear_swing_pitch": 2.0
+        "rear_swing_pitch": 2.0,
+        "stand_still_cmd_penalty": -2.0
     }
 
     dt = env.step_dt

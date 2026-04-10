@@ -21,7 +21,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_UD_p2_p3 import compute_all_rewards
+from .rewards_UD_p3 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
@@ -154,7 +154,6 @@ class Go2HybridEnv(DirectRLEnv):
         self.scene.clone_environments(copy_from_source=False)
 
 
-        #for phase 0
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=["/World/ground"])
 
@@ -367,10 +366,15 @@ class Go2HybridEnv(DirectRLEnv):
         heading = torch.zeros(num_envs, device=self.device)
         self._commands[env_ids, 3] = heading
 
+        p_stop = 0.20  # 20% exact zero-speed commands
         speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
+
+        stop_mask = torch.rand(num_envs, device=self.device) < p_stop
+        speed[stop_mask] = 0.0
+
         self._commands[env_ids, 0] = speed
         self._commands[env_ids, 1] = 0.0
-        self._commands[env_ids, 2] = 0.0
+        self._commands[env_ids, 2] = 0.0 
 
 
 
@@ -478,10 +482,6 @@ class Go2HybridEnv(DirectRLEnv):
         vx_rot = cos_h * vx + sin_h * vy
         vy_rot = -sin_h * vx + cos_h * vy
         cmd_body = torch.stack((vx_rot, vy_rot), dim=1)
-
-        # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
-        # # Commands are already sampled in body frame (vx, vy).
-        # cmd_body = self._commands[env_ids, :2]
 
         cmd_speed = torch.linalg.norm(cmd_body, dim=1)
         arrow_scale_cmd = default_scale.clone()

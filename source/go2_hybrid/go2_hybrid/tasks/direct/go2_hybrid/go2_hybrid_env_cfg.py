@@ -17,7 +17,7 @@ from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
 
-    episode_length_s = 20.0
+    episode_length_s = 100.0
     decimation = 4
     action_space = 12          # Unitree Go2 typically 12 actuated joints
     observation_space = 184    # will be validated at runtime
@@ -36,8 +36,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         dt=1.0 / 200.0,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
+            friction_combine_mode="average",
+            restitution_combine_mode="average",
             static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
@@ -60,13 +60,13 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
         terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_10cm.usdz",
-        #Phase 0-2
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm.usdz",
+        #Phase 3 stuff
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
+            friction_combine_mode="average",
+            restitution_combine_mode="average",
+            static_friction=0.8,
+            dynamic_friction=0.7,
             restitution=0.0,
         ),
         debug_vis=False,
@@ -105,14 +105,16 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         soft_joint_pos_limit_factor=0.9,
         actuators={
             
-            "base_legs": DCMotorCfg(
+            "base_legs": DelayedPDActuatorCfg(
                 joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
                 effort_limit=23.5,
-                saturation_effort=23.5,
+                # saturation_effort=23.5,
                 velocity_limit=30.0,
                 stiffness=25.0,
-                damping=0.5, 
+                damping=0.5,
                 friction=0.0,
+                min_delay=0, #physics timesteps
+                max_delay=3, #physics timesteps (5ms)
             ),
         },
     )
@@ -136,7 +138,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             channels=5,
             vertical_fov_range= [-60,-20], horizontal_fov_range=[-45,45], horizontal_res=10.0        ),
         mesh_prim_paths=["/World/Terrain"],
-        update_period = 0.0,
+        update_period = 1.0 / 5.5, # 5.5 Hz
         history_length=0,
         debug_vis=True,
     )
