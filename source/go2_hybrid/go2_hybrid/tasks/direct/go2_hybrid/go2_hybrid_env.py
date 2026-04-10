@@ -21,24 +21,18 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards import compute_all_rewards
-from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
+from .rewards_plane_p0 import compute_all_rewards
+from .terminations import illegal_contact, out_of_bounds, time_out
 
 class Go2HybridEnv(DirectRLEnv):
     
     cfg: Go2HybridEnvCfg
 
     def __init__(self, cfg: Go2HybridEnvCfg, render_mode: str | None = None, **kwargs):
-        # --- DR DISABLED (EXTERNAL FORCE): force arrow visualization hook ---
-        self._external_force_vis_enabled = False
-
         super().__init__(cfg, render_mode, **kwargs)
 
         self._step_counter =0
         self._marker= None
-
-        # Now cfg is attached to self
-        self.phase_id = int(self.cfg.phase_id)
         
         self._lidar_range = self.cfg.lidar_range
 
@@ -67,33 +61,13 @@ class Go2HybridEnv(DirectRLEnv):
         # feet: explicit four feet
         self._feet_ids, _ = self._contact_sensor.find_bodies(['FL_foot','FR_foot', 'RL_foot', 'RR_foot'])
 
-        if self.phase_id==0:
-            # thighs (undesired contacts): explicit four thighs
-            self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh'])
-        else:
-            self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower', 'FL_calf','FR_calf', 'RL_calf', 'RR_calf'])
 
-        # Body index used for visualizing reset-time external force randomization.
-        base_body_ids, _ = self._robot.find_bodies("base")
-        self._base_body_id = int(base_body_ids[0]) if len(base_body_ids) > 0 else 0
-
+        # thighs (undesired contacts): explicit four thighs
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh'])
 
 
 
     def _setup_scene(self):
-        # phase_id = int(self.cfg.phase_id)
-        # self._ground_contact_sensor = None
-        # ground_plane_cfg = getattr(self.cfg, "ground_plane", None)
-        # has_ground_plane = ground_plane_cfg is not None and ground_plane_cfg.spawn is not None
-
-        # # Spawn optional fallback ground plane configured in env cfg.
-        # if has_ground_plane:
-        #     ground_plane_cfg.spawn.func(
-        #         ground_plane_cfg.prim_path,
-        #         ground_plane_cfg.spawn,
-        #         translation=ground_plane_cfg.init_state.pos,
-        #         orientation=ground_plane_cfg.init_state.rot,
-        #     )
 
         # Spawn robot from cfg
         self._robot = Articulation(self.cfg.robot_cfg)   # note: cfg attribute name is robot_cfg in your direct cfg
@@ -101,11 +75,6 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
-
-        # if phase_id == 4 and has_ground_plane and self.cfg.ground_contact_sensor_cfg is not None:
-        #     ground_contact_sensor_cfg = self.cfg.ground_contact_sensor_cfg
-        #     self._ground_contact_sensor = ContactSensor(ground_contact_sensor_cfg)
-        #     self.scene.sensors["ground_contact_sensor"] = self._ground_contact_sensor
 
         self._height_scanner=RayCaster(self.cfg.height_scanner)
         self.scene.sensors["height_scanner"]=self._height_scanner 
@@ -129,16 +98,6 @@ class Go2HybridEnv(DirectRLEnv):
             },
         )
 
-        _mid_point_marker_cfg = VisualizationMarkersCfg(
-            prim_path="/World/EndPointMarker",
-            markers={
-                "origin_box": sim_utils.SphereCfg(
-                    radius=0.05,
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
-                ),
-            },
-        )
-           
 
         _origin_debug_marker_cfg = VisualizationMarkersCfg(
             prim_path="/World/OriginMarker",
@@ -176,21 +135,6 @@ class Go2HybridEnv(DirectRLEnv):
             },            
         )
 
-        _force_marker_cfg = VisualizationMarkersCfg(
-            prim_path="/World/ForceMarkers",
-            markers={
-                "force_arrow": sim_utils.UsdFileCfg(
-                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.5, 0.5, 0.5),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.2, 0.2)),
-                ),
-            },
-        )
-
-        _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
-        translations = torch.tensor([[self.cfg.end_point_pos, 0.0, 0.5]], dtype=torch.float32)  # icra map
-        _end_point_marker.visualize(translations=translations)
-
 
         # _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         # translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
@@ -201,26 +145,16 @@ class Go2HybridEnv(DirectRLEnv):
         self._lidar_origin_marker_indices = torch.tensor([0], device=self.device)  # 1 marker
 
         self._vel_markers = VisualizationMarkers(_vel_marker_cfg)
-        # --- DR DISABLED (EXTERNAL FORCE): disable external force marker instantiation ---
-        # self._force_markers = (
-        #     VisualizationMarkers(_force_marker_cfg) if self._external_force_vis_enabled else None
-        # )
-        self._force_markers = None
 
-        #----------------------------------------------#
 
 
         # Clone & replicate envs
         self.scene.clone_environments(copy_from_source=False)
 
-        # # CPU collision filtering (same as reference)
-        # if self.device == "cpu" and has_ground_plane:
-        #     self.scene.filter_collisions(global_prim_paths=[ground_plane_cfg.prim_path])
 
         #for phase 0
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=["/World/ground"])
-
 
         # Light
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -294,9 +228,6 @@ class Go2HybridEnv(DirectRLEnv):
         # print("lidar_obs[0] as list:", lidar_obs[0])
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
-        # --- DR DISABLED (EXTERNAL FORCE): disable external force arrow visualization ---
-        # if self.phase_id == 5:
-        #     self._visualize_external_force_arrows()
 
         ###### Used for forward_progress_position
         # 1. Read current x position
@@ -329,19 +260,8 @@ class Go2HybridEnv(DirectRLEnv):
         base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
         oob = out_of_bounds(self, margin=0.5)
 
+        terminated = base_contact | oob 
 
-        # Phase 0 (flat ground) only terminations:
-        if self.phase_id == 0:
-            # print("HERHEHREHRHERHEHEHR IN TERMINATIONS")
-            terminated = base_contact | oob 
-            
-
-        else: 
-            # Phases 1 to 4 termination:
-            flipped = flipped_over(self, threshold=-0.2)
-            stuck_term = stuck(self)
-            end_term = end_point_termination(self)
-            terminated = base_contact | oob | flipped | stuck_term | end_term
         return terminated, time_outs
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -389,16 +309,6 @@ class Go2HybridEnv(DirectRLEnv):
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :3] = base_origin
 
-        #======= Apply a fixed right-turn spawn yaw offset for LiDAR debugging ======
-        # spawn_yaw = torch.full(
-        #     (env_ids.shape[0],),
-        #     -math.radians(60.0),
-        #     device=self.device,
-        #     dtype=default_root_state.dtype,
-        # )
-        # zero_angles = torch.zeros_like(spawn_yaw)
-        # default_root_state[:, 3:7] = quat_from_euler_xyz(zero_angles, zero_angles, spawn_yaw)
-        #================ DEBUGGING END ================
 
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -408,13 +318,6 @@ class Go2HybridEnv(DirectRLEnv):
         self._stand_height_ref[env_ids] = (self._robot.data.default_root_state[env_ids][:, 2] + origins[env_ids][:, 2])
 
         self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
-
-
-        # Phase-dependent reset for Phase 1–4 reward trackers
-        if self.phase_id != 0 and hasattr(self, "_stagnation_buffer"):
-            # Fill rolling buffer with current position so stagnation doesn't trigger immediately
-            current_x = self._robot.data.root_pos_w[env_ids, 0:1]  # [len(env_ids), 1]
-            self._stagnation_buffer[env_ids, :] = current_x.expand(-1, self._stagnation_buffer.shape[1])
 
 
         # --- Immediately sample a new command at episode start ---
@@ -447,51 +350,33 @@ class Go2HybridEnv(DirectRLEnv):
         # Phase 0: Flat ground
         # Random 2D velocity + heading + yaw rate
         # -------------------------
-        if self.phase_id == 0:
-            heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
-            self._commands[env_ids, 3] = heading
 
-            speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
-            direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
+        heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
+        self._commands[env_ids, 3] = heading
 
-            cmd_vx = speed * torch.cos(heading + direction_offset)
-            cmd_vy = speed * torch.sin(heading + direction_offset)
-            yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+        speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+        direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
 
-            self._commands[env_ids, 0] = cmd_vx
-            self._commands[env_ids, 1] = cmd_vy
-            self._commands[env_ids, 2] = yaw_rate
+        cmd_vx = speed * torch.cos(heading + direction_offset)
+        cmd_vy = speed * torch.sin(heading + direction_offset)
+        yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
 
-            # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
-            # speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
-            # body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
-            #
-            # self._commands[env_ids, 0] = speed * torch.cos(body_dir)   # cmd_vx in base frame
-            # self._commands[env_ids, 1] = speed * torch.sin(body_dir)   # cmd_vy in base frame
-            # self._commands[env_ids, 2] = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
-            #
-            # # keep only if you still use heading reward; else set to 0
-            # self._commands[env_ids, 3] = 0.0
+        self._commands[env_ids, 0] = cmd_vx
+        self._commands[env_ids, 1] = cmd_vy
+        self._commands[env_ids, 2] = yaw_rate
+
+        # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
+        # speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
+        # body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
+        #
+        # self._commands[env_ids, 0] = speed * torch.cos(body_dir)   # cmd_vx in base frame
+        # self._commands[env_ids, 1] = speed * torch.sin(body_dir)   # cmd_vy in base frame
+        # self._commands[env_ids, 2] = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+        #
+        # # keep only if you still use heading reward; else set to 0
+        # self._commands[env_ids, 3] = 0.0
 
 
-
-        else:
-            # -------------------------
-            # Phases 1–4: Stairs / ICRA
-            # Forward speed only, fixed heading
-            # -------------------------
-            heading = torch.zeros(num_envs, device=self.device)
-            self._commands[env_ids, 3] = heading
-
-            p_stop = 0.15  # 20% exact zero-speed commands
-            speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
-
-            stop_mask = torch.rand(num_envs, device=self.device) < p_stop
-            speed[stop_mask] = 0.0
-
-            self._commands[env_ids, 0] = speed
-            self._commands[env_ids, 1] = 0.0
-            self._commands[env_ids, 2] = 0.0    
 
     def get_bf_hits(self, env_ids=None):
         """Return all LiDAR hits in BASE frame. Also replaces NaNs with max-range."""
@@ -638,57 +523,4 @@ class Go2HybridEnv(DirectRLEnv):
             marker_indices=marker_indices.cpu().numpy(),
         )
 
-    def _visualize_external_force_arrows(
-        self,
-        env_ids=None,
-        base_marker_scale=(0.5, 0.5, 0.5),
-        scale_mult=0.15,
-        height_offset=0.5,
-        min_force_to_draw=0.05,
-    ):
-        """Visualize currently applied base external force (reset/interval randomization)."""
-        if not self._external_force_vis_enabled or self._force_markers is None:
-            return
 
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-        M = env_ids.shape[0]
-
-        base_pos_w = self._robot.data.root_pos_w[env_ids].clone()
-        base_quat_w = self._robot.data.root_quat_w[env_ids]
-        base_pos_w[:, 2] += height_offset
-
-        # IsaacLab stores applied external wrench in these per-body buffers.
-        force_buffer = getattr(self._robot, "_external_force_b", None)
-        if force_buffer is None:
-            force_buffer = getattr(self._robot.data, "external_force_b", None)
-
-        if force_buffer is not None and force_buffer.ndim == 3 and force_buffer.shape[1] > self._base_body_id:
-            force_b = force_buffer[env_ids, self._base_body_id, :]
-        else:
-            force_b = torch.zeros((M, 3), dtype=base_pos_w.dtype, device=self.device)
-
-        # Use full 3D body-frame force so interval-sampled vertical pushes are also visible.
-        force_mag = torch.linalg.norm(force_b, dim=1)
-
-        default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
-        arrow_scale = default_scale.clone()
-        arrow_scale[:, 0] *= force_mag * scale_mult
-
-        # Build local yaw/pitch so +X arrow aligns with 3D force direction in base frame.
-        heading = torch.atan2(force_b[:, 1], force_b[:, 0])
-        xy_norm = torch.linalg.norm(force_b[:, :2], dim=1)
-        pitch = -torch.atan2(force_b[:, 2], xy_norm + 1.0e-8)
-        zeros = torch.zeros_like(heading)
-        arrow_quat_local = quat_from_euler_xyz(zeros, pitch, heading)
-        arrow_quat = quat_mul(base_quat_w, arrow_quat_local)
-
-        # Hide tiny forces for cleaner visualization.
-        tiny_mask = force_mag < min_force_to_draw
-        arrow_scale[tiny_mask] = 0.0
-
-        self._force_markers.visualize(
-            translations=base_pos_w.cpu().numpy(),
-            orientations=arrow_quat.cpu().numpy(),
-            scales=arrow_scale.cpu().numpy(),
-        )
