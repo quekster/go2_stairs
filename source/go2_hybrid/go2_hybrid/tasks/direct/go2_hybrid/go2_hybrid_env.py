@@ -21,7 +21,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_ascent_p1 import compute_all_rewards
+from .rewards_UD_p2_p3 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
@@ -136,7 +136,7 @@ class Go2HybridEnv(DirectRLEnv):
         )
 
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
-        translations = torch.tensor([[self.cfg.end_point_pos, 0.0, 10.0]], dtype=torch.float32)  # icra map
+        translations = torch.tensor([[self.cfg.end_point_pos, 0.0, 0.0]], dtype=torch.float32)  # icra map
         _end_point_marker.visualize(translations=translations)
         # _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
         # translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)

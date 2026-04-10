@@ -60,7 +60,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
         terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm_ascending.usdz",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_10cm.usdz",
         #Phase 0-2
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
