@@ -27,6 +27,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     max_episode_length = int(episode_length_s / (dt * decimation))
     base_x_offset: float = 2.5
     base_z_offset: float = 0.4
+    end_point_pos: float = 18.0
 
     lidar_range: float = 70.0
 
@@ -45,12 +46,13 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     # ---------- scene ----------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200, env_spacing=1.0, replicate_physics=True
+        num_envs=200, env_spacing=0.0, replicate_physics=True
     )
 
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
-        terrain_type="plane",
+        terrain_type="usd",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm_ascending.usdz",
         #Phase 0-2
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",

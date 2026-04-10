@@ -31,8 +31,83 @@ def out_of_bounds(env, margin: float = 0.5) -> torch.Tensor:
     base_pos = env._robot.data.root_pos_w           # [N, 3]
     env_origins = env._terrain.env_origins          # [N, 3]
 
+    # # distance in XY from center
+    # rel_xy = base_pos[:, :2] - env_origins[:, :2]
+    # out_xy = torch.any(torch.abs(rel_xy) > (env.scene.cfg.env_spacing / 2 + margin), dim=1)
+
+    # below ground level
     below_ground = base_pos[:, 2] < (env_origins[:, 2] - 0.1)
 
     return below_ground
 
+def flipped_over(env, threshold: float = 0.0) -> torch.Tensor:
+    """
+    Terminate when the robot is upside-down or significantly flipped.
+    
+    projected_gravity_b[:, 2] meaning:
+        ~ -1.0   → upright
+        ~  0.0   → sideways
+        ~ +1.0   → upside-down or on back
+    
+    So if gravity_z > threshold, the robot is not upright enough.
+    
+    threshold = -0.2 means:
+        -1.0 ... -0.2     → OK (upright-ish)
+        -0.2 ... +1.0     → TERMINATE (flipped/back/side)
+    """
+    g_b = env._robot.data.projected_gravity_b[:, 2]
+    return g_b > threshold
 
+def stuck(env, vel_thresh: float = 0.03, cmd_thresh: float = 0.2, stuck_time: float = 2.0) -> torch.Tensor:
+    """
+    Terminate when the robot is commanded to move forward but makes no progress
+    for a prolonged period (i.e., stuck on a stair).
+
+    Conditions:
+      - Forward command:          cmd_vx > cmd_thresh
+      - Actual forward velocity:  |vxb| < vel_thresh
+      - Persistence: must remain 'still' for stuck_time seconds.
+
+    Requires env to maintain:
+      env._stuck_counter  (int32 tensor [N])
+
+    Returns:
+      stuck_mask: BoolTensor[N]
+    """
+
+    dt = env.step_dt
+    threshold_steps = int(stuck_time / dt)
+
+    # Base-frame forward velocity
+    vxb = env._robot.data.root_lin_vel_b[:, 0]    # [N]
+
+    # Forward intention
+    cmd_vx = env._commands[:, 0]                  # [N]
+    forward_intent = cmd_vx > cmd_thresh
+
+    # Not moving forward
+    no_motion = torch.abs(vxb) < vel_thresh
+
+    # Stuck if both conditions are true
+    still = forward_intent & no_motion
+
+    # Ensure counter exists
+    if not hasattr(env, "_stuck_counter"):
+        env._stuck_counter = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
+
+    # Update counters
+    env._stuck_counter[still] += 1
+    env._stuck_counter[~still] = 0
+
+    # Terminated if we exceed threshold steps
+    stuck_mask = env._stuck_counter >= threshold_steps
+    return stuck_mask
+
+def end_point_termination(env) -> torch.Tensor:
+    """
+    Terminate when the robot reaches the end point.
+    """
+    # root position in WORLD frame
+    x_pos = env._robot.data.root_pos_w[:, 0]   # [N]
+    end_point = getattr(env.cfg, "end_point_pos", None)    # float
+    return x_pos > end_point
