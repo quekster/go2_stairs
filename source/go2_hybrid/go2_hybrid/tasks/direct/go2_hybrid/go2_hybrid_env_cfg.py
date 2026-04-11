@@ -138,7 +138,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             channels=5,
             vertical_fov_range= [-60,-20], horizontal_fov_range=[-45,45], horizontal_res=10.0        ),
         mesh_prim_paths=["/World/Terrain"],
-        update_period = 1.0 / 5.5, # 5.5 Hz
+        update_period = 0.0, # 5.5 Hz ##########EHRHEHREHREHRHER
         history_length=0,
         debug_vis=True,
     )
