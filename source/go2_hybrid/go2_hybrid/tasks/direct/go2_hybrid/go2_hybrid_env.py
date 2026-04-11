@@ -21,7 +21,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_UD_p3 import compute_all_rewards
+from .rewards_UD_p4 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
@@ -256,12 +256,12 @@ class Go2HybridEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute episode termination signals (orientation, contact, bounds, timeout)."""
 
-        # Constant termination terms across all curriculum phases:
+        # Termination terms for this single-phase branch.
         time_outs = time_out(self)
         base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
         oob = out_of_bounds(self, margin=0.5)
 
-        # Phases 1 to 4 termination:
+        # Task-specific termination terms:
         flipped = flipped_over(self, threshold=-0.2)
         stuck_term = stuck(self)
         end_term = end_point_termination(self)
@@ -326,7 +326,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._robot.data.prev_body_lin_vel_w = self._robot.data.body_lin_vel_w.clone()
 
-        # Reset for Phase 1–4 reward trackers
+        # Reset optional reward trackers
         if hasattr(self, "_stagnation_buffer"):
             # Fill rolling buffer with current position so stagnation doesn't trigger immediately
             current_x = self._robot.data.root_pos_w[env_ids, 0:1]  # [len(env_ids), 1]
@@ -356,12 +356,12 @@ class Go2HybridEnv(DirectRLEnv):
         self.extras["log"].update(extras)
 
     def resample_commands(self, env_ids: torch.Tensor):
-        """Phase-dependent command resampling."""
+        """Command resampling policy for this branch."""
         num_envs = len(env_ids)
 
         # -------------------------
-        # Phases 1–4: Stairs / ICRA
-        # Forward speed only, fixed heading
+        # Stairs / ICRA behavior:
+        # forward speed only, fixed heading
         # -------------------------
         heading = torch.zeros(num_envs, device=self.device)
         self._commands[env_ids, 3] = heading
@@ -520,5 +520,4 @@ class Go2HybridEnv(DirectRLEnv):
             scales=scales.cpu().numpy(),
             marker_indices=marker_indices.cpu().numpy(),
         )
-
 

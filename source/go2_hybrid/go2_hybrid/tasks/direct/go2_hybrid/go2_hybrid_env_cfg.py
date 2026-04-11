@@ -1,5 +1,8 @@
 from pathlib import Path
+import isaaclab.envs.mdp as mdp
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
@@ -13,6 +16,34 @@ from isaaclab.utils.noise import NoiseModelCfg, GaussianNoiseCfg
 
 from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfInvertedPyramidStairsTerrainCfg, MeshInvertedPyramidStairsTerrainCfg, MeshPyramidStairsTerrainCfg
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+
+@configclass
+class EventCfg:
+    """Domain randomization events for DirectEnv."""
+
+    robot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.2, 2.5),
+            "dynamic_friction_range": (0.2, 2.3),
+            "restitution_range": (0.0, 0.8),
+            "num_buckets": 64,
+        },
+    )
+
+    robot_actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.85, 1.15),
+            "damping_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
 
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
@@ -30,8 +61,10 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     end_point_pos: float = 18.0
 
     lidar_range: float = 70.0
+    # Hook domain randomization terms into DirectRLEnv/EventManager.
+    events: EventCfg = EventCfg()
 
-    #simulation for phase 0-2
+    # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 200.0,
         render_interval=decimation,
@@ -60,8 +93,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
         terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm.usdz",
-        #Phase 3 stuff
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
+        # fixed terrain for this branch
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="average",
             restitution_combine_mode="average",
@@ -138,7 +171,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
             channels=5,
             vertical_fov_range= [-60,-20], horizontal_fov_range=[-45,45], horizontal_res=10.0        ),
         mesh_prim_paths=["/World/Terrain"],
-        update_period = 0.0, # 5.5 Hz ##########EHRHEHREHREHRHER
+        update_period = 1.0/5.5, # 5.5 Hz ##########EHRHEHREHREHRHER
         history_length=0,
         debug_vis=True,
     )
@@ -151,6 +184,4 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         mesh_prim_paths=["/World/Terrain"],
         debug_vis=False,
     )
-
-
 
