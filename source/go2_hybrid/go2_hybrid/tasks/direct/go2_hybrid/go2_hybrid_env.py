@@ -21,7 +21,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_UD_p4 import compute_all_rewards
+from .rewards_UD_p5 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
@@ -33,6 +33,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._step_counter =0
         self._marker= None
+        self._base_body_id = 0
         
         self._lidar_range = self.cfg.lidar_range
 
@@ -72,6 +73,13 @@ class Go2HybridEnv(DirectRLEnv):
         # Spawn robot from cfg
         self._robot = Articulation(self.cfg.robot_cfg)   # note: cfg attribute name is robot_cfg in your direct cfg
         self.scene.articulations["robot"] = self._robot
+
+        # Cache base body index for external-force visualisation and disturbance-aware rewards.
+        base_body_ids, _ = self._robot.find_bodies("base")
+        if len(base_body_ids) == 0:
+            base_body_ids, _ = self._robot.find_bodies("trunk")
+        if len(base_body_ids) > 0:
+            self._base_body_id = int(base_body_ids[0])
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
@@ -134,6 +142,16 @@ class Go2HybridEnv(DirectRLEnv):
                 ),
             },            
         )
+        _force_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/ForceMarkers",
+            markers={
+                "force_arrow": sim_utils.UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                    scale=(0.5, 0.5, 0.5),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.2, 0.2)),
+                ),
+            },
+        )
 
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
         translations = torch.tensor([[self.cfg.end_point_pos, 0.0, 0.0]], dtype=torch.float32)  # icra map
@@ -147,7 +165,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._lidar_origin_marker_indices = torch.tensor([0], device=self.device)  # 1 marker
 
         self._vel_markers = VisualizationMarkers(_vel_marker_cfg)
-
+        self._force_markers = VisualizationMarkers(_force_marker_cfg)
 
 
         # Clone & replicate envs
@@ -229,6 +247,7 @@ class Go2HybridEnv(DirectRLEnv):
         # print("lidar_obs[0] as list:", lidar_obs[0])
         self._visualize_lidar_origin()
         self._visualize_velocity_arrows()
+        self._visualize_external_force_arrows()
 
         ###### Used for forward_progress_position
         # 1. Read current x position
@@ -521,3 +540,58 @@ class Go2HybridEnv(DirectRLEnv):
             marker_indices=marker_indices.cpu().numpy(),
         )
 
+    def _visualize_external_force_arrows(
+        self,
+        env_ids=None,
+        base_marker_scale=(0.5, 0.5, 0.5),
+        scale_mult=0.15,
+        height_offset=0.5,
+        min_force_to_draw=0.05,
+    ):
+        """Visualize currently applied base external force (reset/interval randomization)."""
+        if self._force_markers is None:
+            return
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        M = env_ids.shape[0]
+        base_body_id = int(getattr(self, "_base_body_id", 0))
+
+        base_pos_w = self._robot.data.root_pos_w[env_ids].clone()
+        base_quat_w = self._robot.data.root_quat_w[env_ids]
+        base_pos_w[:, 2] += height_offset
+
+        # IsaacLab stores applied external wrench in these per-body buffers.
+        force_buffer = getattr(self._robot, "_external_force_b", None)
+        if force_buffer is None:
+            force_buffer = getattr(self._robot.data, "external_force_b", None)
+
+        if force_buffer is not None and force_buffer.ndim == 3 and force_buffer.shape[1] > base_body_id:
+            force_b = force_buffer[env_ids, base_body_id, :]
+        else:
+            force_b = torch.zeros((M, 3), dtype=base_pos_w.dtype, device=self.device)
+
+        # Use full 3D body-frame force so interval-sampled vertical pushes are also visible.
+        force_mag = torch.linalg.norm(force_b, dim=1)
+
+        default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
+        arrow_scale = default_scale.clone()
+        arrow_scale[:, 0] *= force_mag * scale_mult
+
+        # Build local yaw/pitch so +X arrow aligns with 3D force direction in base frame.
+        heading = torch.atan2(force_b[:, 1], force_b[:, 0])
+        xy_norm = torch.linalg.norm(force_b[:, :2], dim=1)
+        pitch = -torch.atan2(force_b[:, 2], xy_norm + 1.0e-8)
+        zeros = torch.zeros_like(heading)
+        arrow_quat_local = quat_from_euler_xyz(zeros, pitch, heading)
+        arrow_quat = quat_mul(base_quat_w, arrow_quat_local)
+
+        # Hide tiny forces for cleaner visualization.
+        tiny_mask = force_mag < min_force_to_draw
+        arrow_scale[tiny_mask] = 0.0
+
+        self._force_markers.visualize(
+            translations=base_pos_w.cpu().numpy(),
+            orientations=arrow_quat.cpu().numpy(),
+            scales=arrow_scale.cpu().numpy(),
+        )
