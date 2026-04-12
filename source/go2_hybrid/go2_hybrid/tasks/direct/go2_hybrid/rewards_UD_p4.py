@@ -16,33 +16,6 @@ def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
     lin_vel_error = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     return torch.exp(-lin_vel_error / std2)
 
-
-def track_modified_vel_reward(env, base_std2=0.25, pitch_thresh=0.15):
-    """
-    Blends base-frame velocity tracking with world-frame forward progression,
-    depending on pitch angle. Smooth transition avoids reward conflict.
-    """
-
-    # --- base-frame tracking ---
-    vel_b = env._robot.data.root_lin_vel_b[:, :2]
-    cmd   = env._commands[:, :2]
-    base_error = torch.sum((cmd - vel_b)**2, dim=1)
-    track_base = torch.exp(-base_error / base_std2)
-
-    # --- world-frame forward progress ---
-    track_world = world_aligned_velocity_reward(env)   # from earlier
-
-    # --- compute pitch magnitude ---
-    pitch = get_pitch_from_quat(env._robot.data.root_quat_w).abs()
-
-    # pitch-based blending
-    weight = torch.sigmoid( 5.0 * (pitch - pitch_thresh) )
-
-    # --- blend ---
-    reward = (1 - weight) * track_base + weight * track_world
-
-    return reward
-
 def world_aligned_velocity_reward(env, scale=1.0):
     """
     Reward the robot for producing world-frame forward motion
@@ -650,7 +623,6 @@ def stand_still_cmd_penalty(
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
         "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
-        # "track_modified_vel_reward": track_modified_vel_reward(env),
         "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
         "lin_vel_z_penalty": lin_vel_z_penalty(env),
         "ang_vel_xy_penalty": ang_vel_xy_penalty(env),
@@ -683,7 +655,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     # --- Scales: tuned for flat-ground learning ---
     w = {
         "track_lin_vel_xy_exp": 8.0,
-        # "track_modified_vel_reward": 2.0,
         "track_ang_vel_z_exp": 1.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.5,
