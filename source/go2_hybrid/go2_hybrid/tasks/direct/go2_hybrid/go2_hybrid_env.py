@@ -365,17 +365,30 @@ class Go2HybridEnv(DirectRLEnv):
         self._commands[env_ids, 1] = cmd_vy
         self._commands[env_ids, 2] = yaw_rate
 
-        # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
-        # speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
-        # body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
-        #
-        # self._commands[env_ids, 0] = speed * torch.cos(body_dir)   # cmd_vx in base frame
-        # self._commands[env_ids, 1] = speed * torch.sin(body_dir)   # cmd_vy in base frame
-        # self._commands[env_ids, 2] = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
-        #
-        # # keep only if you still use heading reward; else set to 0
-        # self._commands[env_ids, 3] = 0.0
+    # --- THIS CODE BELOW IS FOR RESAMPLING BODY-FRAME COMMANDS BUT POLICY FAILS THIS ---
+    # def resample_commands(self, env_ids: torch.Tensor):
+    #     """Phase-dependent command resampling."""
+    #     num_envs = len(env_ids)
 
+    #     # calmer body-frame command distribution (trot-friendly)
+    #     speed = torch.empty(num_envs, device=self.device).uniform_(0.0,1.0)
+    #     body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
+
+    #     self._commands[env_ids, 0] = speed * torch.cos(body_dir)  # vx body
+    #     self._commands[env_ids, 1] = speed * torch.sin(body_dir)  # vy body
+
+    #     p_zero_yaw = 0.5
+
+    #     raw_yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+    #     is_turn_cmd = torch.rand(num_envs, device=self.device) > p_zero_yaw
+
+    #     yaw_rate = torch.where(is_turn_cmd, raw_yaw_rate, torch.zeros_like(raw_yaw_rate))
+    #     self._commands[env_ids, 2] = yaw_rate
+
+
+    #     # no world-heading objective in body-frame phase
+    #     self._commands[env_ids, 3] = 0.0
+    #------------------------------------------------------------------------#
 
 
     def get_bf_hits(self, env_ids=None):
