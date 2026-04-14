@@ -138,9 +138,7 @@ class Go2HybridEnv(DirectRLEnv):
         _end_point_marker = VisualizationMarkers(_end_point_marker_cfg)
         translations = torch.tensor([[self.cfg.end_point_pos, 0.0, 0.0]], dtype=torch.float32)  # icra map
         _end_point_marker.visualize(translations=translations)
-        # _origin_debug_marker = VisualizationMarkers(_origin_debug_marker_cfg)
-        # translations = torch.tensor([[0.0, 0.0, 0.3]], dtype=torch.float32)  # shape (1,3)
-        # _origin_debug_marker.visualize(translations=translations)
+
 
         self._lidar_origin_debug_marker = VisualizationMarkers(_lidar_origin_debug_marker_cfg)
         self._lidar_origin_marker_type = list(_lidar_origin_debug_marker_cfg.markers.keys())  # ['lidar_origin_box']
