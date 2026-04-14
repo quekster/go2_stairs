@@ -21,7 +21,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_UD_p2_p3 import compute_all_rewards
+from .rewards_UD_p2 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
