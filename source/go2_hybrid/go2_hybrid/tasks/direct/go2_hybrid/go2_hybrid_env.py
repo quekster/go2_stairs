@@ -258,7 +258,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         # Termination terms for this single-phase branch.
         time_outs = time_out(self)
-        base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
+        base_contact = illegal_contact(self, threshold=5.0, body_names=["base", "Head_lower"])
         oob = out_of_bounds(self, margin=0.5)
 
         # Task-specific termination terms:
@@ -520,4 +520,3 @@ class Go2HybridEnv(DirectRLEnv):
             scales=scales.cpu().numpy(),
             marker_indices=marker_indices.cpu().numpy(),
         )
-

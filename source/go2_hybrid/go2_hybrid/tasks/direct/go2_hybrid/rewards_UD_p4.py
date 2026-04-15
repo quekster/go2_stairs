@@ -654,7 +654,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        "track_lin_vel_xy_exp": 8.0,
+        "track_lin_vel_xy_exp": 8.5,
         "track_ang_vel_z_exp": 1.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.5,
