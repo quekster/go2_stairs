@@ -66,7 +66,9 @@ class Go2HybridEnv(DirectRLEnv):
         # thighs (undesired contacts): explicit four thighs
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(['FL_thigh','FR_thigh', 'RL_thigh', 'RR_thigh', 'Head_lower', 'FL_calf','FR_calf', 'RL_calf', 'RR_calf'])
 
-
+        # Body index used for visualizing reset-time external force randomization.
+        base_body_ids, _ = self._robot.find_bodies("base")
+        self._base_body_id = int(base_body_ids[0]) if len(base_body_ids) > 0 else 0
 
     def _setup_scene(self):
 
@@ -74,12 +76,6 @@ class Go2HybridEnv(DirectRLEnv):
         self._robot = Articulation(self.cfg.robot_cfg)   # note: cfg attribute name is robot_cfg in your direct cfg
         self.scene.articulations["robot"] = self._robot
 
-        # Cache base body index for external-force visualisation and disturbance-aware rewards.
-        base_body_ids, _ = self._robot.find_bodies("base")
-        if len(base_body_ids) == 0:
-            base_body_ids, _ = self._robot.find_bodies("trunk")
-        if len(base_body_ids) > 0:
-            self._base_body_id = int(base_body_ids[0])
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
@@ -166,6 +162,9 @@ class Go2HybridEnv(DirectRLEnv):
 
         self._vel_markers = VisualizationMarkers(_vel_marker_cfg)
         self._force_markers = VisualizationMarkers(_force_marker_cfg)
+
+        #----------------------------------------------#
+
 
 
         # Clone & replicate envs
@@ -277,7 +276,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         # Termination terms for this single-phase branch.
         time_outs = time_out(self)
-        base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
+        base_contact = illegal_contact(self, threshold=5.0, body_names=["base", "Head_lower"])
         oob = out_of_bounds(self, margin=0.5)
 
         # Task-specific termination terms:
@@ -385,7 +384,7 @@ class Go2HybridEnv(DirectRLEnv):
         heading = torch.zeros(num_envs, device=self.device)
         self._commands[env_ids, 3] = heading
 
-        p_stop = 0.20  # 20% exact zero-speed commands
+        p_stop = 0.15  # 20% exact zero-speed commands
         speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
 
         stop_mask = torch.rand(num_envs, device=self.device) < p_stop
@@ -545,17 +544,16 @@ class Go2HybridEnv(DirectRLEnv):
         env_ids=None,
         base_marker_scale=(0.5, 0.5, 0.5),
         scale_mult=0.15,
-        height_offset=0.5,
+        height_offset=0.3,
         min_force_to_draw=0.05,
     ):
-        """Visualize currently applied base external force (reset/interval randomization)."""
+        """Visualize base external-force commands using the same arrow convention as velocity arrows."""
         if self._force_markers is None:
             return
 
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
         M = env_ids.shape[0]
-        base_body_id = int(getattr(self, "_base_body_id", 0))
 
         base_pos_w = self._robot.data.root_pos_w[env_ids].clone()
         base_quat_w = self._robot.data.root_quat_w[env_ids]
@@ -566,32 +564,32 @@ class Go2HybridEnv(DirectRLEnv):
         if force_buffer is None:
             force_buffer = getattr(self._robot.data, "external_force_b", None)
 
-        if force_buffer is not None and force_buffer.ndim == 3 and force_buffer.shape[1] > base_body_id:
-            force_b = force_buffer[env_ids, base_body_id, :]
+        if force_buffer is not None and force_buffer.ndim == 3 and force_buffer.shape[1] > self._base_body_id:
+            force_b = force_buffer[env_ids, self._base_body_id, :]
         else:
             force_b = torch.zeros((M, 3), dtype=base_pos_w.dtype, device=self.device)
 
-        # Use full 3D body-frame force so interval-sampled vertical pushes are also visible.
-        force_mag = torch.linalg.norm(force_b, dim=1)
+        # Match command-arrow style: use body-frame XY direction and speed-like scaling.
+        force_xy = force_b[:, :2]
+        force_mag = torch.linalg.norm(force_xy, dim=1)
 
         default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
         arrow_scale = default_scale.clone()
         arrow_scale[:, 0] *= force_mag * scale_mult
 
-        # Build local yaw/pitch so +X arrow aligns with 3D force direction in base frame.
-        heading = torch.atan2(force_b[:, 1], force_b[:, 0])
-        xy_norm = torch.linalg.norm(force_b[:, :2], dim=1)
-        pitch = -torch.atan2(force_b[:, 2], xy_norm + 1.0e-8)
+        heading = torch.atan2(force_xy[:, 1], force_xy[:, 0])
         zeros = torch.zeros_like(heading)
-        arrow_quat_local = quat_from_euler_xyz(zeros, pitch, heading)
+        arrow_quat_local = quat_from_euler_xyz(zeros, zeros, heading)
         arrow_quat = quat_mul(base_quat_w, arrow_quat_local)
 
         # Hide tiny forces for cleaner visualization.
         tiny_mask = force_mag < min_force_to_draw
         arrow_scale[tiny_mask] = 0.0
 
+        marker_indices = torch.zeros(M, dtype=torch.int32, device=self.device)
         self._force_markers.visualize(
             translations=base_pos_w.cpu().numpy(),
             orientations=arrow_quat.cpu().numpy(),
             scales=arrow_scale.cpu().numpy(),
+            marker_indices=marker_indices.cpu().numpy(),
         )

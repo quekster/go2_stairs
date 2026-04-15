@@ -724,7 +724,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
         "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
         "disturbance_stabilisation": disturbance_stabilisation(env),
-        # "track_modified_vel_reward": track_modified_vel_reward(env),
         "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
         "lin_vel_z_penalty": lin_vel_z_penalty(env),
         "ang_vel_xy_penalty": ang_vel_xy_penalty(env),
@@ -756,9 +755,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        "track_lin_vel_xy_exp": 8.0,
-        "disturbance_stabilisation": 2.0,
-        # "track_modified_vel_reward": 2.0,
+        "track_lin_vel_xy_exp": 8.5,
+        "disturbance_stabilisation": 1.0,
         "track_ang_vel_z_exp": 1.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.5,
@@ -766,7 +764,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.2,
         "undesired_contacts": -4.0,
-        "flat_orientation": -2.0, 
+        "flat_orientation": -0.8, 
         "flat_orientation_roll": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
@@ -778,11 +776,11 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "backward_vel_penalty": -4.0,
         "feet_air_time_rear": 2.0,
         "stagnation_penalty": -3.0,
-        "forward_progress": 2.0,
+        "forward_progress": 3.0,
         "rear_match_front": 2.0,
         "foot_lateral_separation_penalty": -4.0,
         "hip_deflection_l2": -5.0,
-        "track_center_path": 5.0,
+        "track_center_path": 4.0,
         "rear_swing_pitch": 2.0,
         "stand_still_cmd_penalty": -2.0
     }

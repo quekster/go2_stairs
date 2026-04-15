@@ -70,7 +70,7 @@ class EventCfg:
 
     base_external_force_torque = EventTerm(
         func=mdp.apply_external_force_torque,
-        mode="interval", #could be "reset" 
+        mode="interval",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
             "force_range": (-5.0, 5.0),
@@ -94,7 +94,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     dt=0.005
     action_scale = 0.25
     max_episode_length = int(episode_length_s / (dt * decimation))
-    base_x_offset: float = 2.5
+    base_x_offset: float = 2.6
     base_z_offset: float = 0.4
     end_point_pos: float = 18.0
 
