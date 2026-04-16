@@ -50,7 +50,7 @@ class Go2HybridEnv(DirectRLEnv):
         self._stand_height_ref = torch.zeros(self.num_envs, device=self.device)
 
         # X/Y linear velocity (body frame) + yaw rate commands
-        self._commands = torch.zeros(self.num_envs, 4, device=self.device)
+        self._commands = torch.zeros(self.num_envs, 3, device=self.device)
         self._prev_root_x = torch.zeros(self.num_envs, device=self.device)
 
         self._episode_sums = {}
@@ -194,10 +194,9 @@ class Go2HybridEnv(DirectRLEnv):
         lidar_obs = self.get_single_lidar_obs()
         obs_policy = torch.cat(
             [
-                self._robot.data.root_lin_vel_b,                  # (N,3) → vx, vy, vz
                 self._robot.data.root_ang_vel_b,                  # (N,3) → ωx, ωy, ωz
                 self._robot.data.projected_gravity_b,             # (N,3) → gx, gy, gz
-                self._commands,                                   # (N,4) → cmd_vx, cmd_vy, cmd_yaw_rate, heading
+                self._commands,                                   # (N,3) → cmd_vx, cmd_vy, cmd_yaw_rate
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos, # (N,ndof) joint pos error
                 self._robot.data.joint_vel,                       # (N,ndof) joint velocities
                 self._actions,                                    # (N,12) previous actions
@@ -209,7 +208,8 @@ class Go2HybridEnv(DirectRLEnv):
         # Critic observations (privileged)
         privileged = torch.cat(
             [
-                obs_policy, #(N, 184)
+                obs_policy,                            # (N, 180)
+                self._robot.data.root_lin_vel_b,      # (N, 3) privileged only
                 self._robot.data.root_pos_w,            # (N, 3)
                 self._robot.data.root_quat_w,           # (N, 4)
                 self._robot.data.applied_torque,        # (N, 12)
@@ -257,7 +257,7 @@ class Go2HybridEnv(DirectRLEnv):
 
         # Constant termination terms across all curriculum phases:
         time_outs = time_out(self)
-        base_contact = illegal_contact(self, threshold=5.0, body_names=["base"])
+        base_contact = illegal_contact(self, threshold=5.0, body_names=["base", "Head_lower"])
         oob = out_of_bounds(self, margin=0.5)
 
         terminated = base_contact | oob 
@@ -348,47 +348,20 @@ class Go2HybridEnv(DirectRLEnv):
 
         # -------------------------
         # Phase 0: Flat ground
-        # Random 2D velocity + heading + yaw rate
+        # Random 2D velocity in body frame + yaw rate
         # -------------------------
 
-        heading = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
-        self._commands[env_ids, 3] = heading
+        speed = torch.empty(num_envs, device=self.device).uniform_(0.6, 1.0)
+        direction = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
 
-        speed = torch.empty(num_envs, device=self.device).uniform_(0.0, 1.0)
-        direction_offset = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
-
-        cmd_vx = speed * torch.cos(heading + direction_offset)
-        cmd_vy = speed * torch.sin(heading + direction_offset)
+        cmd_vx = speed * torch.cos(direction)
+        cmd_vy = speed * torch.sin(direction)
         yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
 
         self._commands[env_ids, 0] = cmd_vx
         self._commands[env_ids, 1] = cmd_vy
         self._commands[env_ids, 2] = yaw_rate
 
-    # --- THIS CODE BELOW IS FOR RESAMPLING BODY-FRAME COMMANDS BUT POLICY FAILS THIS ---
-    # def resample_commands(self, env_ids: torch.Tensor):
-    #     """Phase-dependent command resampling."""
-    #     num_envs = len(env_ids)
-
-    #     # calmer body-frame command distribution (trot-friendly)
-    #     speed = torch.empty(num_envs, device=self.device).uniform_(0.0,1.0)
-    #     body_dir = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
-
-    #     self._commands[env_ids, 0] = speed * torch.cos(body_dir)  # vx body
-    #     self._commands[env_ids, 1] = speed * torch.sin(body_dir)  # vy body
-
-    #     p_zero_yaw = 0.5
-
-    #     raw_yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
-    #     is_turn_cmd = torch.rand(num_envs, device=self.device) > p_zero_yaw
-
-    #     yaw_rate = torch.where(is_turn_cmd, raw_yaw_rate, torch.zeros_like(raw_yaw_rate))
-    #     self._commands[env_ids, 2] = yaw_rate
-
-
-    #     # no world-heading objective in body-frame phase
-    #     self._commands[env_ids, 3] = 0.0
-    #------------------------------------------------------------------------#
 
 
     def get_bf_hits(self, env_ids=None):
@@ -483,20 +456,7 @@ class Go2HybridEnv(DirectRLEnv):
         default_scale = torch.tensor(base_marker_scale, device=self.device).unsqueeze(0).repeat(M, 1)
         
         # ================= Command (green) arrow =================
-        # World-frame sampling path: rotate commanded (vx, vy) by heading to body intent.
-        heading = self._commands[env_ids, 3]
-        cos_h = torch.cos(heading)
-        sin_h = torch.sin(heading)
-
-        vx = self._commands[env_ids, 0]
-        vy = self._commands[env_ids, 1]
-        vx_rot = cos_h * vx + sin_h * vy
-        vy_rot = -sin_h * vx + cos_h * vy
-        cmd_body = torch.stack((vx_rot, vy_rot), dim=1)
-
-        # --- FOLLOW-UP (NEW BODY-FRAME SAMPLING) DISABLED ---
-        # # Commands are already sampled in body frame (vx, vy).
-        # cmd_body = self._commands[env_ids, :2]
+        cmd_body = self._commands[env_ids, :2]
 
         cmd_speed = torch.linalg.norm(cmd_body, dim=1)
         arrow_scale_cmd = default_scale.clone()
@@ -535,5 +495,4 @@ class Go2HybridEnv(DirectRLEnv):
             scales=scales.cpu().numpy(),
             marker_indices=marker_indices.cpu().numpy(),
         )
-
 

@@ -63,27 +63,25 @@ def _transform_policy_obs_left_right(obs: torch.Tensor, ndof: int) -> torch.Tens
     x = obs.clone()
     device = x.device
 
-    # Fixed segment boundaries based on my own observation structure
+    # Fixed segment boundaries for policy observation:
+    # [ang_vel(3), projected_gravity(3), commands(3), joint_pos(12), joint_vel(12), last_actions(12), lidar(...)]
     i = 0
-    lin_vel = slice(i, i+3); i += 3
     ang_vel = slice(i, i+3); i += 3
     proj_g  = slice(i, i+3); i += 3
-    cmds    = slice(i, i+4); i += 4
+    cmds    = slice(i, i+3); i += 3
     jpos    = slice(i, i+ndof); i += ndof
     jvel    = slice(i, i+ndof); i += ndof
     lacts   = slice(i, i+ndof); i += ndof
     lidar   = slice(i, x.shape[1])
 
     # sign flips
-    x[:, lin_vel] *= torch.tensor([1.0, -1.0,  1.0], device=device)
     x[:, ang_vel] *= torch.tensor([-1.0,  1.0, -1.0], device=device)
     x[:, proj_g ] *= torch.tensor([1.0, -1.0,  1.0], device=device)
 
-    # commands: [vx, vy, yaw_rate, heading] -> vy, yaw, heading flip
+    # commands: [vx, vy, yaw_rate] -> vy, yaw flip
     x_cmd = x[:, cmds].clone()
     x_cmd[:, 1] *= -1.0   # vy
     x_cmd[:, 2] *= -1.0   # yaw_rate
-    x_cmd[:, 3] *= -1.0   # heading
     x[:, cmds] = x_cmd
 
     # joints

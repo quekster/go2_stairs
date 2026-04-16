@@ -1,32 +1,16 @@
 # rewards.py
 import torch
 from typing import Dict, Tuple
-import math
 
 def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded linear velocity (x,y) in body frame."""
-    cmd_body = get_heading_rotated_commands(env)
-    lin_vel_err = torch.sum(torch.square(cmd_body[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
+    lin_vel_err = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     return torch.exp(-lin_vel_err / std2)
 
 def track_ang_vel_z_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded yaw rate."""
     err = torch.square(env._commands[:, 2] - env._robot.data.root_ang_vel_b[:, 2])
     return torch.exp(-err / std2)
-
-def track_heading_reward(env, std2: float = 0.5) -> torch.Tensor:
-    """Reward facing toward commanded heading angle."""
-    # Get robot yaw from its quaternion
-    quat = env._robot.data.root_quat_w
-    # yaw = atan2(2*(wz + xy), 1 - 2*(y^2 + z^2))
-    yaw = torch.atan2(
-        2.0 * (quat[:, 3] * quat[:, 2] + quat[:, 0] * quat[:, 1]),
-        1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2),
-    )
-    yaw_err = torch.square(torch.atan2(torch.sin(yaw - env._commands[:, 3]),
-                                       torch.cos(yaw - env._commands[:, 3])))
-    return torch.exp(-yaw_err / std2)
-
 
 def lin_vel_z_penalty(env) -> torch.Tensor:
     return torch.square(env._robot.data.root_lin_vel_b[:, 2])
@@ -136,7 +120,7 @@ def foot_clearance_reward(env, desired_clearance: float = 0.20, safety_margin: f
 
 def stand_still_joint_deviation_l1(env, command_threshold: float = 0.06) -> torch.Tensor:
     """Penalize offsets from the default joint positions when the command is very small."""
-    commands = env._commands # [num_envs, 4]: [vx, vy, yaw_rate, heading]
+    commands = env._commands # [num_envs, 3]: [vx, vy, yaw_rate]
     joint_dev = torch.sum(torch.abs(env._robot.data.joint_pos - env._robot.data.default_joint_pos), dim=1) # L1 deviation per environment (sum over all joints)
     cmd_mag = torch.norm(commands[:, :2], dim=1) # magnitude of (vx, vy) command
     return joint_dev * (cmd_mag < command_threshold)
@@ -216,7 +200,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "feet_slide_penalty": feet_slide(env),
         "base_height_penalty": base_height_penalty(env),
         "foot_clearance_reward": foot_clearance_reward(env),
-        "track_heading_reward": track_heading_reward(env),
         "stand_still_joint_deviation_l1": stand_still_joint_deviation_l1(env),
         "foot_lateral_separation_penalty": foot_lateral_separation_penalty(env),
     }
@@ -230,7 +213,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "joint_torque_penalty": -2.0e-5,
         "joint_acc_penalty": -2.0e-7,
         "action_rate_penalty": -0.5,
-        "feet_air_time": 0.6, #increased from 0.4
+        "feet_air_time": 0.4, #increased from 0.4
         "undesired_contacts": -1.0,
         "flat_orientation": -1.0, #decreased from -4.0
         "lin_vel_z_penalty": -2.0,
@@ -238,7 +221,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "feet_slide_penalty": -0.1,
         "base_height_penalty": -4.0, #increased from -6.5
         "foot_clearance_reward": 0.5,
-        "track_heading_reward": 0.1,
         "joint_pos_limit": -0.5,
         "stand_still_joint_deviation_l1": -0.4,
         "foot_lateral_separation_penalty": -0.05,
@@ -253,24 +235,3 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     total_reward = torch.sum(torch.stack(list(scaled.values())), dim=0)
     return total_reward, scaled
-
-def get_heading_rotated_commands(env) -> torch.Tensor:
-    """
-    Rotate commanded (x, y) velocities from world-heading frame into body frame
-    using the commanded heading angle.
-    Returns tensor [num_envs, 3] (vx_body, vy_body, yaw_rate)
-    """
-    # commanded heading
-    heading = env._commands[:, 3]
-    cos_h = torch.cos(heading)
-    sin_h = torch.sin(heading)
-
-    vx = env._commands[:, 0]
-    vy = env._commands[:, 1]
-
-    # rotation from world heading to body frame
-    vx_rot = cos_h * vx + sin_h * vy
-    vy_rot = -sin_h * vx + cos_h * vy
-
-    yaw_rate = env._commands[:, 2]
-    return torch.stack((vx_rot, vy_rot, yaw_rate), dim=1)

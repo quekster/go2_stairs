@@ -20,8 +20,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     episode_length_s = 20.0
     decimation = 4
     action_space = 12          # Unitree Go2 typically 12 actuated joints
-    observation_space = 184    # will be validated at runtime
-    state_space = 314
+    observation_space = 180    # will be validated at runtime
+    state_space = 313
     dt=0.005
     action_scale = 0.25
     max_episode_length = int(episode_length_s / (dt * decimation))
@@ -139,6 +139,5 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         mesh_prim_paths=["/World/Terrain"],
         debug_vis=False,
     )
-
 
 
