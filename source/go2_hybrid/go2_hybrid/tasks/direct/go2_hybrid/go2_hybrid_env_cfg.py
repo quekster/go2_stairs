@@ -1,5 +1,9 @@
 from pathlib import Path
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
@@ -13,6 +17,30 @@ from isaaclab.utils.noise import NoiseModelCfg, GaussianNoiseCfg
 
 from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfInvertedPyramidStairsTerrainCfg, MeshInvertedPyramidStairsTerrainCfg, MeshPyramidStairsTerrainCfg
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+from . import observation_terms as obs_terms
+
+@configclass
+class ObservationNoiseCfg:
+    """ObsTerm-style observation corruption settings for DirectRLEnv policy inputs."""
+
+    enable_corruption: bool = True
+
+    root_ang_vel_b = ObsTerm(
+        func=obs_terms.root_ang_vel_b,
+        noise=Unoise(n_min=-0.2, n_max=0.2),
+    )
+    projected_gravity_b = ObsTerm(
+        func=obs_terms.projected_gravity_b,
+        noise=Unoise(n_min=-0.05, n_max=0.05), 
+    )
+    joint_pos = ObsTerm(
+        func=obs_terms.joint_pos_rel,
+        noise=Unoise(n_min=-0.01, n_max=0.01),
+    )
+    joint_vel = ObsTerm(
+        func=obs_terms.joint_vel,
+        noise=Unoise(n_min=-1.5, n_max=1.5),
+    )
 
 @configclass
 class Go2HybridEnvCfg(DirectRLEnvCfg):
@@ -30,6 +58,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     lidar_range: float = 70.0
 
+    obs_noise: ObservationNoiseCfg = ObservationNoiseCfg()
+
     #simulation for phase 0-2
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 200.0,
@@ -45,12 +75,24 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     # ---------- scene ----------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200, env_spacing=1.0, replicate_physics=True
+        num_envs=200, env_spacing=0.0, replicate_physics=True
     )
+
+
+    # Action noise (applied to the raw [-1, 1] actions coming from the policy)
+    action_noise_model = NoiseModelCfg(
+        noise_cfg=GaussianNoiseCfg(
+            mean=0.0,
+            std=0.20,          
+            operation="add",
+        )
+    )
+
 
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
-        terrain_type="plane",
+        terrain_type="usd",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/100_stairs_10cm_ascending.usdz",
         #Phase 0-2
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",

@@ -13,6 +13,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 # from .visualisation import VelArrowsVisualizer
 from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_euler_xyz, quat_mul
+from isaaclab.utils import noise as noise_utils
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -21,7 +22,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_plane_p0 import compute_all_rewards
+from .rewards_ascent_p1 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out
 
 class Go2HybridEnv(DirectRLEnv):
@@ -192,13 +193,27 @@ class Go2HybridEnv(DirectRLEnv):
         # lidar_obs = self.get_stacked_hits()
         height_obs = (self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5).clip(-1.0, 1.0) # -0.5 is an empirical centering offset introduced so that the height-observation distribution is centered around 0 for flat terrain
         lidar_obs = self.get_single_lidar_obs()
+
+        #Can toggle between noise and no noise for observations here:
+
+        root_ang_vel_b = self._compute_obs_term(self.cfg.obs_noise.root_ang_vel_b)
+        # root_ang_vel_b = self._robot.data.root_ang_vel_b
+
+        projected_gravity_b = self._compute_obs_term(self.cfg.obs_noise.projected_gravity_b)
+        # projected_gravity_b = self._robot.data.projected_gravity_b
+
+        joint_pos_rel = self._compute_obs_term(self.cfg.obs_noise.joint_pos)
+        # joint_pos_rel = self._robot.data.joint_pos - self._robot.data.default_joint_pos
+
+        joint_vel = self._compute_obs_term(self.cfg.obs_noise.joint_vel)
+        # joint_vel = self._robot.data.joint_vel
         obs_policy = torch.cat(
             [
-                self._robot.data.root_ang_vel_b,                  # (N,3) → ωx, ωy, ωz
-                self._robot.data.projected_gravity_b,             # (N,3) → gx, gy, gz
-                self._commands,                                   # (N,3) → cmd_vx, cmd_vy, cmd_yaw_rate
-                self._robot.data.joint_pos - self._robot.data.default_joint_pos, # (N,ndof) joint pos error
-                self._robot.data.joint_vel,                       # (N,ndof) joint velocities
+                root_ang_vel_b,                                   # (N,3) → ωx, ωy, ωz
+                projected_gravity_b,                              # (N,3) → gx, gy, gz
+                self._commands,                                   # (N,4) → cmd_vx, cmd_vy, cmd_yaw_rate, heading
+                joint_pos_rel,                                    # (N,ndof) joint pos error
+                joint_vel,                                        # (N,ndof) joint velocities
                 self._actions,                                    # (N,12) previous actions
                 lidar_obs,                                        # (N, 135) lidar hits
             ],
@@ -239,7 +254,29 @@ class Go2HybridEnv(DirectRLEnv):
             "policy": obs_policy,      # for actor network
             "critic": privileged,      # for critic network
         }
+    
+    def _compute_obs_term(self, term_cfg) -> torch.Tensor:
+        """Apply ObsTerm-style processing (noise/clip/scale) inside DirectRLEnv."""
+        obs = term_cfg.func(self, **term_cfg.params).clone()
 
+        if term_cfg.modifiers is not None:
+            for modifier in term_cfg.modifiers:
+                obs = modifier.func(obs, **modifier.params)
+
+        if getattr(self.cfg.obs_noise, "enable_corruption", True):
+            if isinstance(term_cfg.noise, noise_utils.NoiseCfg):
+                obs = term_cfg.noise.func(obs, term_cfg.noise)
+            elif isinstance(term_cfg.noise, noise_utils.NoiseModelCfg):
+                obs = term_cfg.noise.noise_cfg.func(obs, term_cfg.noise.noise_cfg)
+
+        if term_cfg.clip is not None:
+            obs = obs.clip_(min=term_cfg.clip[0], max=term_cfg.clip[1])
+
+        if term_cfg.scale is not None:
+            obs = obs.mul_(term_cfg.scale)
+
+        return obs
+    
     def _get_rewards(self) -> torch.Tensor:
         total, terms = compute_all_rewards(self)
         if not self._episode_sums:
@@ -344,23 +381,21 @@ class Go2HybridEnv(DirectRLEnv):
 
     def resample_commands(self, env_ids: torch.Tensor):
         """Phase-dependent command resampling."""
+
         num_envs = len(env_ids)
 
         # -------------------------
-        # Phase 0: Flat ground
-        # Random 2D velocity in body frame + yaw rate
+        # Phase 1+: forward-only body-frame command
+        # [vx_cmd, 0.0, 0.0]
         # -------------------------
 
-        speed = torch.empty(num_envs, device=self.device).uniform_(0.6, 1.0)
-        direction = torch.empty(num_envs, device=self.device).uniform_(-math.pi / 6, math.pi / 6)
-
-        cmd_vx = speed * torch.cos(direction)
-        cmd_vy = speed * torch.sin(direction)
-        yaw_rate = torch.empty(num_envs, device=self.device).uniform_(-0.5, 0.5)
+        speed = torch.empty(num_envs, device=self.device).uniform_(0.4, 1.0)
+        cmd_vx = speed
+        cmd_vy = torch.zeros(num_envs, device=self.device)
+        yaw_rate = torch.zeros(num_envs, device=self.device)
 
         self._commands[env_ids, 0] = cmd_vx
         self._commands[env_ids, 1] = cmd_vy
-        self._commands[env_ids, 2] = yaw_rate
 
 
 
@@ -495,4 +530,3 @@ class Go2HybridEnv(DirectRLEnv):
             scales=scales.cpu().numpy(),
             marker_indices=marker_indices.cpu().numpy(),
         )
-

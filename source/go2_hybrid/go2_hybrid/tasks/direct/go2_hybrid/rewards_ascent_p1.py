@@ -1,7 +1,6 @@
 # rewards.py
 import torch
 from typing import Dict, Tuple
-import math
 from isaaclab.utils.math import quat_apply, quat_conjugate
 
 def nan_check(reward: torch.Tensor, obs_type: str):
@@ -13,86 +12,13 @@ def nan_check(reward: torch.Tensor, obs_type: str):
 
 def track_lin_vel_xy_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded linear velocity (x,y) in body frame."""
-    # cmd_body = get_heading_rotated_commands(env)
-    # lin_vel_err = torch.sum(torch.square(cmd_body[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     lin_vel_error = torch.sum(torch.square(env._commands[:, :2] - env._robot.data.root_lin_vel_b[:, :2]), dim=1)
     return torch.exp(-lin_vel_error / std2)
-
-def track_modified_vel_reward(env, base_std2=0.25, pitch_thresh=0.15):
-    """
-    Blends base-frame velocity tracking with world-frame forward progression,
-    depending on pitch angle. Smooth transition avoids reward conflict.
-    """
-
-    # --- base-frame tracking ---
-    vel_b = env._robot.data.root_lin_vel_b[:, :2]
-    cmd   = env._commands[:, :2]
-    base_error = torch.sum((cmd - vel_b)**2, dim=1)
-    track_base = torch.exp(-base_error / base_std2)
-
-    # --- world-frame forward progress ---
-    track_world = world_aligned_velocity_reward(env)   # from earlier
-
-    # --- compute pitch magnitude ---
-    pitch = get_pitch_from_quat(env._robot.data.root_quat_w).abs()
-
-    # pitch-based blending
-    weight = torch.sigmoid( 5.0 * (pitch - pitch_thresh) )
-
-    # --- blend ---
-    reward = (1 - weight) * track_base + weight * track_world
-
-    return reward
-
-def world_aligned_velocity_reward(env, scale=1.0):
-    """
-    Reward the robot for producing world-frame forward motion
-    even when pitched or rolled.
-    This rotates the desired command into BASE frame, so the
-    robot learns to compensate for orientation.
-    """
-
-    # desired direction in WORLD frame (normalized)
-    cmd = env._commands[:, :2]                # (vx, vy)
-    cmd_3d = torch.cat([cmd, torch.zeros_like(cmd[:, :1])], dim=1)   # [N,3]
-    cmd_norm = cmd_3d / (torch.norm(cmd_3d, dim=1, keepdim=True) + 1e-6)
-
-    # actual velocity in WORLD frame
-    vel_w = env._robot.data.root_lin_vel_w[:, :3]                   # [N,3]
-
-    # convert ACTUAL velocity into BASE frame
-    base_quat = env._robot.data.root_quat_w                          # [N,4]
-    base_quat_inv = quat_conjugate(base_quat)
-    vel_b = quat_apply(base_quat_inv, vel_w)                         # [N,3]
-
-    # convert DESIRED world direction into BASE frame
-    desired_dir_b = quat_apply(base_quat_inv, cmd_norm)              # [N,3]
-
-    # cosine similarity = alignment
-    alignment = torch.sum(vel_b * desired_dir_b, dim=1)
-
-    # keep reward positive
-    return scale * torch.relu(alignment)
-
-
 
 def track_ang_vel_z_exp(env, std2: float = 0.25) -> torch.Tensor:
     """Reward tracking of commanded yaw rate."""
     err = torch.square(env._commands[:, 2] - env._robot.data.root_ang_vel_b[:, 2])
     return torch.exp(-err / std2)
-
-def track_heading_reward(env, std2: float = 0.5) -> torch.Tensor:
-    """Reward facing toward commanded heading angle."""
-    # Get robot yaw from its quaternion
-    quat = env._robot.data.root_quat_w
-    # yaw = atan2(2*(wz + xy), 1 - 2*(y^2 + z^2))
-    yaw = torch.atan2(
-        2.0 * (quat[:, 3] * quat[:, 2] + quat[:, 0] * quat[:, 1]),
-        1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2),
-    )
-    yaw_err = torch.square(torch.atan2(torch.sin(yaw - env._commands[:, 3]),
-                                       torch.cos(yaw - env._commands[:, 3])))
-    return torch.exp(-yaw_err / std2)
 
 def lin_vel_z_penalty(env) -> torch.Tensor:
     return torch.square(env._robot.data.root_lin_vel_b[:, 2])
@@ -582,7 +508,6 @@ def track_center_path(env, std: float = 0.15) -> torch.Tensor:
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
         "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
-        # "track_modified_vel_reward": track_modified_vel_reward(env),
         "track_ang_vel_z_exp": track_ang_vel_z_exp(env),
         "lin_vel_z_penalty": lin_vel_z_penalty(env),
         "ang_vel_xy_penalty": ang_vel_xy_penalty(env),
@@ -611,8 +536,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     # --- Scales: tuned for flat-ground learning ---
     w = {
-        "track_lin_vel_xy_exp": 8.0,
-        # "track_modified_vel_reward": 2.0,
+        "track_lin_vel_xy_exp": 11.0,
         "track_ang_vel_z_exp": 1.0,
          "lin_vel_z_penalty": -0.5,       
         "ang_vel_xy_penalty": -0.5,
@@ -623,17 +547,17 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "flat_orientation": -2.0,
         "energy_penalty": -1.0e-6,
         "feet_slide_penalty": -0.5,
-        "foot_clearance_reward": 2.5,
+        "foot_clearance_reward": 3.5,
         "joint_pos_limit": -0.6,
         "smoothness_penalty": -0.01,
         "base_height_l2_lidar": -1.0,
-        "foot_vertical_accel_reward": 1.4,
-        "backward_vel_penalty": -4.0,
+        "foot_vertical_accel_reward": 2.0,
+        "backward_vel_penalty": -5.0,
         "feet_air_time_rear": 2.0,
         "stagnation_penalty": -3.0,
         "forward_progress": 5.0,
         "rear_match_front": 2.0,
-        "foot_lateral_separation_penalty": -4.0,
+        "foot_lateral_separation_penalty": -2.0,
         "hip_deflection_l2": -1.0,
         "track_center_path": 1.0,
     }
@@ -645,28 +569,6 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
     total_reward = torch.sum(torch.stack(list(scaled.values())), dim=0)
     return total_reward, scaled
-
-def get_heading_rotated_commands(env) -> torch.Tensor:
-    """
-    Rotate commanded (x, y) velocities from world-heading frame into body frame
-    using the commanded heading angle.
-    Returns tensor [num_envs, 3] (vx_body, vy_body, yaw_rate)
-    """
-    # commanded heading
-    heading = env._commands[:, 3]
-    cos_h = torch.cos(heading)
-    sin_h = torch.sin(heading)
-
-    vx = env._commands[:, 0]
-    vy = env._commands[:, 1]
-
-    # rotation from world heading to body frame
-    vx_rot = cos_h * vx + sin_h * vy
-    vy_rot = -sin_h * vx + cos_h * vy
-
-    yaw_rate = env._commands[:, 2]
-    return torch.stack((vx_rot, vy_rot, yaw_rate), dim=1)
-
 
 def get_height_lidar(env, channel: int = None) -> torch.Tensor:
     """
