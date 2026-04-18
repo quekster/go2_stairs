@@ -214,13 +214,13 @@ class Go2HybridEnv(DirectRLEnv):
 
         #Can toggle between noise and no noise for observations here:
         root_lin_vel_b = self._compute_obs_term(self.cfg.obs_noise.root_lin_vel_b)
-        root_lin_vel_b = self._robot.data.root_lin_vel_b
+        # root_lin_vel_b = self._robot.data.root_lin_vel_b
 
         root_ang_vel_b = self._compute_obs_term(self.cfg.obs_noise.root_ang_vel_b)
-        root_ang_vel_b = self._robot.data.root_ang_vel_b
+        # root_ang_vel_b = self._robot.data.root_ang_vel_b
 
         projected_gravity_b = self._compute_obs_term(self.cfg.obs_noise.projected_gravity_b)
-        projected_gravity_b = self._robot.data.projected_gravity_b
+        # projected_gravity_b = self._robot.data.projected_gravity_b
 
         # joint_pos_rel = self._compute_obs_term(self.cfg.obs_noise.joint_pos)
         joint_pos_rel = self._robot.data.joint_pos - self._robot.data.default_joint_pos

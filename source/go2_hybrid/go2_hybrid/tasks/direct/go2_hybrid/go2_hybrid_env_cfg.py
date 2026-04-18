@@ -163,8 +163,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
-        terrain_type="usd",
-        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
+        terrain_type="plane",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
         # fixed terrain for this branch
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="average",

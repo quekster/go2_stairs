@@ -186,7 +186,7 @@ def feet_slide(env) -> torch.Tensor:
     foot_vel_xy = env._robot.data.body_lin_vel_w[:, foot_ids, :2]
     return torch.sum(torch.norm(foot_vel_xy, dim=-1) * contact[:, foot_ids], dim=1)
 
-def base_height_l2_lidar(env, target: float = 0.30, std: float = 0.05) -> torch.Tensor:
+def base_height_l2_lidar(env, target: float = 0.40, std: float = 0.05) -> torch.Tensor:
     """"
     Penalize deviation of the robot's base height from a terrain-relative target height.
     To maintain a stable target above whatever terrain the height_scanner detects.
@@ -771,7 +771,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "foot_clearance_reward": 2.5,
         "joint_pos_limit": -0.6,
         "smoothness_penalty": -0.01,
-        "base_height_l2_lidar": -2.0,
+        "base_height_l2_lidar": -2.5,
         "foot_vertical_accel_reward": 1.4,
         "backward_vel_penalty": -4.0,
         "feet_air_time_rear": 2.0,
