@@ -720,6 +720,29 @@ def stand_still_cmd_penalty(
     return penalty * flat_stop_mask
 
 
+def default_pos_reward(
+    env,
+    std2: float = 0.05,
+    flat_terrain_delta_thresh: float = 0.04,
+    terrain_scan_radius: float = 0.12,
+) -> torch.Tensor:
+    """
+    Reward joints staying close to default standing pose.
+    Applies only when local terrain under the feet is flat.
+    """
+    joint_default_err = torch.mean(
+        (env._robot.data.joint_pos - env._robot.data.default_joint_pos) ** 2, dim=1
+    )
+    reward = torch.exp(-joint_default_err / std2)
+
+    terrain_z_b = feet_height_scanner(env, radius=terrain_scan_radius)  # [N,4]
+    terrain_step = torch.max(terrain_z_b, dim=1).values - torch.min(terrain_z_b, dim=1).values
+    terrain_step = torch.nan_to_num(terrain_step, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
+    flat_ground_mask = (terrain_step < flat_terrain_delta_thresh).float()
+
+    return reward * flat_ground_mask
+
+
 def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     raw: Dict[str, torch.Tensor] = {
         "track_lin_vel_xy_exp": track_lin_vel_xy_exp(env),
@@ -750,6 +773,7 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "track_center_path": track_center_path(env),
         "rear_swing_pitch": rear_swing_pitch(env),
         "stand_still_cmd_penalty": stand_still_cmd_penalty(env),
+        "default_pos_reward": default_pos_reward(env),
 
     }
 
@@ -782,7 +806,8 @@ def compute_all_rewards(env) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         "hip_deflection_l2": -5.0,
         "track_center_path": 4.0,
         "rear_swing_pitch": 2.0,
-        "stand_still_cmd_penalty": -2.0
+        "stand_still_cmd_penalty": -2.0,
+        "default_pos_reward": 1.0,
     }
 
     dt = env.step_dt

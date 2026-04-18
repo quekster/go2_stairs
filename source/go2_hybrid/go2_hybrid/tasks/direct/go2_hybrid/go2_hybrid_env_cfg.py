@@ -53,7 +53,7 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (-5.0, 5.0),
+            "mass_distribution_params": (-3.0, 5.0),
             "operation": "add",
         },
     )
@@ -163,8 +163,8 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
 
     terrain = TerrainImporterCfg(
         prim_path="/World/Terrain",
-        terrain_type="plane",
-        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
+        terrain_type="usd",
+        usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
         # fixed terrain for this branch
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="average",

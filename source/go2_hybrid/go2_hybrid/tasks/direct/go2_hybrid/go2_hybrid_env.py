@@ -22,7 +22,7 @@ import omni.timeline
 import math
 
 from .go2_hybrid_env_cfg import Go2HybridEnvCfg
-from .rewards_UD_p6 import compute_all_rewards
+from .rewards_UD_p7 import compute_all_rewards
 from .terminations import illegal_contact, out_of_bounds, time_out, flipped_over, stuck, end_point_termination
 
 class Go2HybridEnv(DirectRLEnv):
@@ -222,11 +222,11 @@ class Go2HybridEnv(DirectRLEnv):
         projected_gravity_b = self._compute_obs_term(self.cfg.obs_noise.projected_gravity_b)
         # projected_gravity_b = self._robot.data.projected_gravity_b
 
-        # joint_pos_rel = self._compute_obs_term(self.cfg.obs_noise.joint_pos)
-        joint_pos_rel = self._robot.data.joint_pos - self._robot.data.default_joint_pos
+        joint_pos_rel = self._compute_obs_term(self.cfg.obs_noise.joint_pos)
+        # joint_pos_rel = self._robot.data.joint_pos - self._robot.data.default_joint_pos
 
-        # joint_vel = self._compute_obs_term(self.cfg.obs_noise.joint_vel)
-        joint_vel = self._robot.data.joint_vel
+        joint_vel = self._compute_obs_term(self.cfg.obs_noise.joint_vel)
+        # joint_vel = self._robot.data.joint_vel
 
 
         obs_policy = torch.cat(
