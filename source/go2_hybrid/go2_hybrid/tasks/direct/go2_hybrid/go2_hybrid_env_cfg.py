@@ -125,8 +125,12 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
     dt=0.005
     action_scale = 0.25
     max_episode_length = int(episode_length_s / (dt * decimation))
-    base_x_offset: float = 2.6
+    base_x_offset: float = 2.6 #standard
     base_z_offset: float = 0.4
+    # base_x_offset: float = 0.0 #descent
+    # base_z_offset: float = 2.21
+    # base_x_offset: float = -1.0 #icra
+    # base_z_offset: float = 0.55
     end_point_pos: float = 18.0
 
     lidar_range: float = 70.0
@@ -165,6 +169,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         prim_path="/World/Terrain",
         terrain_type="usd",
         usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/icra_map_flat_long.usdz", 
         # fixed terrain for this branch
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="average",
