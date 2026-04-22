@@ -79,7 +79,7 @@ class EventCfg:
             "force_range": (-5.0, 5.0),
             "torque_range": (-1.0, 1.0),
         },
-        interval_range_s=(3.0, 10.0),
+        interval_range_s=(0.0, 5.0),
         is_global_time=False,
     )
 
@@ -169,6 +169,7 @@ class Go2HybridEnvCfg(DirectRLEnvCfg):
         prim_path="/World/Terrain",
         terrain_type="usd",
         usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_18cm_wide.usdz",
+        # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/updown_random_wide.usdz",
         # usd_path="/home/ril/go2_hybrid/go2_hybrid/source/go2_hybrid/assets/go2_hybrid/icra_map_flat_long.usdz", 
         # fixed terrain for this branch
         physics_material=sim_utils.RigidBodyMaterialCfg(

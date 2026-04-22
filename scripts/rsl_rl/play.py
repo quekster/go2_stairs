@@ -15,7 +15,15 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+from body_attitude_eval import PlayBodyAttitudeRecorder  # isort: skip
+from duty_phase_eval import PlayDutyPhaseRecorder  # isort: skip
 from footfall_eval import PlayFootfallRecorder  # isort: skip
+from foot_trajectory_eval import PlayFootTrajectoryRecorder  # isort: skip
+
+# Body-attitude pitch reference settings (hard-coded; edit here for different stairs).
+BODY_ATTITUDE_PITCH_REF_H = 0.18  # stair rise h (meters)
+BODY_ATTITUDE_PITCH_REF_D = 0.18 # stair run d (meters)
+BODY_ATTITUDE_PITCH_REF_MODE = "ascent"  # one of: ascent, descent, flat
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -53,6 +61,97 @@ parser.add_argument(
     type=float,
     default=5.0,
     help="Contact force threshold (N) used to classify stance for each foot.",
+)
+parser.add_argument(
+    "--duty_phase_eval",
+    action="store_true",
+    default=False,
+    help="Enable duty-factor and phase-offset evaluation.",
+)
+parser.add_argument(
+    "--foot_trajectory_eval",
+    "--foot_tip_eval",
+    dest="foot_trajectory_eval",
+    action="store_true",
+    default=False,
+    help="Enable foot trajectory evaluation.",
+)
+parser.add_argument(
+    "--foot_trajectory_env_id",
+    "--foot_tip_env_id",
+    dest="foot_trajectory_env_id",
+    type=int,
+    default=0,
+    help="Environment index to record for foot trajectory plotting.",
+)
+parser.add_argument(
+    "--foot_trajectory_force_threshold",
+    "--foot_tip_force_threshold",
+    dest="foot_trajectory_force_threshold",
+    type=float,
+    default=5.0,
+    help="Contact force threshold (N) used to classify swing/stance for foot trajectory analysis.",
+)
+parser.add_argument(
+    "--duty_phase_env_id",
+    type=int,
+    default=0,
+    help="Environment index to record for duty-factor/phase-offset plotting.",
+)
+parser.add_argument(
+    "--duty_phase_force_threshold",
+    type=float,
+    default=5.0,
+    help="Contact force threshold (N) used to classify stance for duty/phase metrics.",
+)
+parser.add_argument(
+    "--duty_phase_reference_leg",
+    type=str,
+    default="RL",
+    choices=("FL", "FR", "RL", "RR"),
+    help="Reference leg used to define stride cycles and phase offsets.",
+)
+parser.add_argument(
+    "--body_attitude_eval",
+    action="store_true",
+    default=False,
+    help="Enable body-attitude stability evaluation.",
+)
+parser.add_argument(
+    "--body_attitude_env_id",
+    type=int,
+    default=0,
+    help="Environment index to record for body-attitude stability plots.",
+)
+parser.add_argument(
+    "--body_attitude_roll_band_deg",
+    type=float,
+    default=6.0,
+    help="Roll stability threshold band in degrees.",
+)
+parser.add_argument(
+    "--body_attitude_pitch_band_deg",
+    type=float,
+    default=8.0,
+    help="Pitch-error stability threshold band in degrees.",
+)
+parser.add_argument(
+    "--body_attitude_tilt_band_deg",
+    type=float,
+    default=10.0,
+    help="Tilt-magnitude threshold in degrees.",
+)
+parser.add_argument(
+    "--body_attitude_ang_vel_band_deg_s",
+    type=float,
+    default=35.0,
+    help="Body angular-rate magnitude threshold in deg/s.",
+)
+parser.add_argument(
+    "--body_attitude_recovery_window_s",
+    type=float,
+    default=2.0,
+    help="Time window after each external-force event for recovery metrics.",
 )
 parser.add_argument(
     "--recording_timer",
@@ -170,6 +269,65 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
         print(f"[INFO] Footfall evaluation enabled. Output directory: {footfall_recorder.output_dir}")
 
+    duty_phase_recorder = None
+    if args_cli.duty_phase_eval:
+        duty_phase_output_dir = os.path.join(log_dir, "duty_phase_eval")
+        duty_phase_recorder = PlayDutyPhaseRecorder(
+            output_dir=duty_phase_output_dir,
+            env_id=args_cli.duty_phase_env_id,
+            force_threshold=args_cli.duty_phase_force_threshold,
+            phase_reference_leg=args_cli.duty_phase_reference_leg,
+        )
+        print(
+            "[INFO] Duty/phase evaluation enabled. "
+            f"Reference leg: {duty_phase_recorder.phase_reference_leg}. "
+            f"Output directory: {duty_phase_recorder.output_dir}"
+        )
+
+    foot_trajectory_recorder = None
+    if args_cli.foot_trajectory_eval:
+        foot_trajectory_output_dir = os.path.join(log_dir, "foot_trajectory_eval")
+        foot_trajectory_recorder = PlayFootTrajectoryRecorder(
+            output_dir=foot_trajectory_output_dir,
+            env_id=args_cli.foot_trajectory_env_id,
+            force_threshold=args_cli.foot_trajectory_force_threshold,
+        )
+        print(
+            "[INFO] Foot-trajectory evaluation enabled. "
+            f"Output directory: {foot_trajectory_recorder.output_dir}"
+        )
+
+    body_attitude_recorder = None
+    if args_cli.body_attitude_eval:
+        body_attitude_output_dir = os.path.join(log_dir, "body_attitude_eval")
+        body_attitude_recorder = PlayBodyAttitudeRecorder(
+            output_dir=body_attitude_output_dir,
+            env_id=args_cli.body_attitude_env_id,
+            roll_band_deg=args_cli.body_attitude_roll_band_deg,
+            pitch_band_deg=args_cli.body_attitude_pitch_band_deg,
+            tilt_band_deg=args_cli.body_attitude_tilt_band_deg,
+            ang_vel_band_deg_s=args_cli.body_attitude_ang_vel_band_deg_s,
+            pitch_ref_h=BODY_ATTITUDE_PITCH_REF_H,
+            pitch_ref_d=BODY_ATTITUDE_PITCH_REF_D,
+            pitch_ref_mode=BODY_ATTITUDE_PITCH_REF_MODE,
+            recovery_window_s=args_cli.body_attitude_recovery_window_s,
+        )
+        if body_attitude_recorder.pitch_ref_mode == "ascent":
+            ref_note = (
+                "Ascent mode: pitch-ref sign is auto-resolved from observed pitch trace at finalize. "
+                f"Initial |pitch_ref|={abs(body_attitude_recorder.pitch_ref_deg):.2f} deg."
+            )
+        else:
+            ref_note = f"pitch_ref={body_attitude_recorder.pitch_ref_deg:.2f} deg."
+        print(
+            "[INFO] Body-attitude evaluation enabled. "
+            f"Pitch ref mode={body_attitude_recorder.pitch_ref_mode}, "
+            f"h={body_attitude_recorder.pitch_ref_h:.4f} m, "
+            f"d={body_attitude_recorder.pitch_ref_d:.4f} m, "
+            f"{ref_note} "
+            f"Output directory: {body_attitude_recorder.output_dir}"
+        )
+
     if args_cli.recording_timer > 0.0:
         print(f"[INFO] Recording timer enabled: {args_cli.recording_timer:.2f}s (simulation time).")
 
@@ -232,6 +390,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             if footfall_recorder is not None:
                 footfall_recorder.record_step(env, sim_step=sim_step, sim_time_s=sim_time_s)
+            if duty_phase_recorder is not None:
+                duty_phase_recorder.record_step(env, sim_step=sim_step, sim_time_s=sim_time_s)
+            if foot_trajectory_recorder is not None:
+                foot_trajectory_recorder.record_step(env, sim_step=sim_step, sim_time_s=sim_time_s)
+            if body_attitude_recorder is not None:
+                body_attitude_recorder.record_step(env, sim_step=sim_step, sim_time_s=sim_time_s)
 
             if args_cli.recording_timer > 0.0 and sim_time_s >= args_cli.recording_timer:
                 stop_requested = True
@@ -259,6 +423,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] Footfall session saved to: {output_paths['output_dir']}")
             print(f"[INFO] Footfall CSV saved to: {output_paths['csv_path']}")
             print(f"[INFO] Footfall plot saved to: {output_paths['plot_path']}")
+        if duty_phase_recorder is not None:
+            output_paths = duty_phase_recorder.finalize()
+            print(f"[INFO] Duty/phase session saved to: {output_paths['output_dir']}")
+            print(f"[INFO] Duty/phase samples CSV saved to: {output_paths['samples_csv_path']}")
+            print(f"[INFO] Duty/phase cycles CSV saved to: {output_paths['cycles_csv_path']}")
+            print(f"[INFO] Duty/phase summary CSV saved to: {output_paths['summary_csv_path']}")
+            print(f"[INFO] Duty/phase plot saved to: {output_paths['plot_path']}")
+        if foot_trajectory_recorder is not None:
+            output_paths = foot_trajectory_recorder.finalize()
+            print(f"[INFO] Foot-trajectory session saved to: {output_paths['output_dir']}")
+            print(f"[INFO] Foot-trajectory samples CSV saved to: {output_paths['samples_csv_path']}")
+            print(f"[INFO] Foot-trajectory summary CSV saved to: {output_paths['summary_csv_path']}")
+            print(f"[INFO] Foot-trajectory plot saved to: {output_paths['plot_path']}")
+        if body_attitude_recorder is not None:
+            output_paths = body_attitude_recorder.finalize()
+            print(f"[INFO] Body-attitude session saved to: {output_paths['output_dir']}")
+            print(f"[INFO] Body-attitude samples CSV saved to: {output_paths['samples_csv_path']}")
+            print(f"[INFO] Body-attitude events CSV saved to: {output_paths['events_csv_path']}")
+            print(f"[INFO] Body-attitude summary CSV saved to: {output_paths['summary_csv_path']}")
+            print(f"[INFO] Body-attitude plot saved to: {output_paths['plot_path']}")
         # close the simulator
         env.close()
 
